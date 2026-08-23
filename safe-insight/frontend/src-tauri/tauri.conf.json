@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Safe Insight",
+  "version": "0.1.0",
+  "identifier": "com.safeinsight.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Safe Insight - Offline Document Intelligence",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8765 http://localhost:8765 ws://localhost:1420 http://localhost:1420"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis", "deb", "dmg"],
+    "icon": [],
+    "category": "Productivity",
+    "shortDescription": "Offline RAG for confidential documents",
+    "longDescription": "Ask questions about your own documents entirely on-device. No cloud APIs, no telemetry, every answer cited to its source, every query logged locally for compliance."
+  }
+}

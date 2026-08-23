@@ -1,0 +1,3 @@
+DEBUG: host='8.8.8.8', candidate='8.8.8.8', sanct=set(), global_sanct=set(), active=False
+DEBUG: host='huggingface.co', candidate='huggingface.co', sanct=set(), global_sanct={'huggingface.co', '.huggingface.co', '.hf.co'}, active=True
+DEBUG: host='us.aws.cdn.hf.co', candidate='us.aws.cdn.hf.co', sanct=set(), global_sanct={'huggingface.co', '108.159.15.3', '108.159.15.84', '108.159.15.97', '.huggingface.co', '.hf.co', '108.159.15.21'}, active=True

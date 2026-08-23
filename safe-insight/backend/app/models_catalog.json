@@ -1,0 +1,35 @@
+[
+  {
+    "id": "light-phi35-q4",
+    "tier": "light",
+    "name": "Phi-3.5 Mini (Q4_K_M)",
+    "size_gb": 2.3,
+    "min_ram_gb": 8,
+    "description": "Fast and light. Good for quick Q&A and general study documents on modest hardware.",
+    "repo": "bartowski/Phi-3.5-mini-instruct-GGUF",
+    "filename": "Phi-3.5-mini-instruct-Q4_K_M.gguf",
+    "sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5"
+  },
+  {
+    "id": "balanced-llama31-q4",
+    "tier": "balanced",
+    "name": "Llama 3.1 8B (Q4_K_M)",
+    "size_gb": 4.9,
+    "min_ram_gb": 16,
+    "description": "The recommended sweet spot. Excellent reasoning and comprehension for most use cases.",
+    "repo": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+    "filename": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+    "sha256": "7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c"
+  },
+  {
+    "id": "rigorous-llama31-q8",
+    "tier": "rigorous",
+    "name": "Llama 3.1 8B (Q8_0)",
+    "size_gb": 8.5,
+    "min_ram_gb": 16,
+    "description": "High precision. Best for dense technical documents where nuance matters.",
+    "repo": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+    "filename": "Meta-Llama-3.1-8B-Instruct-Q8_0.gguf",
+    "sha256": "9da71c45c90a821809821244d4971e5e5dfad7eb091f0b8ff0546392393b6283"
+  }
+]

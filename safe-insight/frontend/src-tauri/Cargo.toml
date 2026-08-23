@@ -1,0 +1,30 @@
+[package]
+name = "safe-insight"
+version = "0.1.0"
+description = "Offline-only RAG desktop app with citation trail and local audit log"
+authors = ["Safe Insight"]
+edition = "2021"
+rust-version = "1.77"
+
+# The library target Tauri 2 generates for mobile is not used here; this is a
+# desktop-only app, so main.rs is the single entry point.
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# This feature is used by `tauri build --debug` to keep the console attached.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+# Smaller binary; the app is I/O and Python-bound, not Rust-bound, so trading
+# compile time for size is the right call.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

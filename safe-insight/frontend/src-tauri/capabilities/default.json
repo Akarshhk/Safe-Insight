@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimum permissions for the Safe Insight main window. The shell spawns the Python backend itself in Rust, so no shell/fs/http plugin permissions are needed - which is the point: the smaller this list, the smaller the attack surface.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

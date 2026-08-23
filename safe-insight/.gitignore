@@ -1,0 +1,88 @@
+# --------------------------------------------------------------------------
+# Safe Insight - .gitignore
+#
+# Rule of thumb: anything that is downloaded, generated, or contains a user's
+# documents stays out of version control. The audit log and FAISS index are
+# *user data*, and the model weights are gigabytes.
+# --------------------------------------------------------------------------
+
+# ---- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+backend/venv/
+backend/.venv/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Model weights (multi-GB; fetched by download_model.py) ---------------
+backend/models/
+models/
+*.gguf
+*.bin
+*.safetensors
+*.onnx
+*.pt
+
+# ---- Runtime data: user documents, index, audit log -----------------------
+# NEVER commit these. They are the confidential material the whole app exists
+# to keep on-device.
+backend/data/
+data/
+*.faiss
+*.faiss.tmp
+metadata.json.tmp
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+audit_export.jsonl
+
+# ---- Node / frontend ------------------------------------------------------
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Rust / Tauri ---------------------------------------------------------
+frontend/src-tauri/target/
+frontend/src-tauri/gen/
+target/
+**/*.rs.bk
+
+# ---- Editors / OS ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Local environment overrides ------------------------------------------
+.env
+.env.local

@@ -1,0 +1,170 @@
+{
+ "format_version": 1,
+ "files": {
+  ".gitattributes": {
+   "size": 1229,
+   "blob_id": "2bf99854609538f90af03c921c41a0cbde670b2f"
+  },
+  "1_Pooling/config.json": {
+   "size": 190,
+   "blob_id": "d1514c3162bbe87b343f565fadc62e6c06f04f03"
+  },
+  "README.md": {
+   "size": 10502,
+   "blob_id": "44af2e3b0fa3a0b6239e48422972bf755f28fde0"
+  },
+  "config.json": {
+   "size": 612,
+   "blob_id": "72b987fd805cfa2b58c4c8c952b274a11bfd5a00"
+  },
+  "config_sentence_transformers.json": {
+   "size": 116,
+   "blob_id": "fd1b291129c607e5d49799f87cb219b27f98acdf"
+  },
+  "data_config.json": {
+   "size": 39265,
+   "blob_id": "2e85f0eac205cf444bdf97ede4935603ca6a0416"
+  },
+  "model.safetensors": {
+   "size": 90868376,
+   "blob_id": "d49eff1e4a6f0e3ba5069f21c6d20aad156dd2c9",
+   "lfs_sha256": "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+   "lfs_size": 90868376,
+   "xet_hash": "789fdf16a3e59f4fbfb6002967ecee539a198dadb5be74ca549aa7dc9b1b55fb"
+  },
+  "modules.json": {
+   "size": 349,
+   "blob_id": "952a9b81c0bfd99800fabf352f69c7ccd46c5e43"
+  },
+  "onnx/model.onnx": {
+   "size": 90405214,
+   "blob_id": "7d35d33d315a1ce897ce7cca38d42234e1d55add",
+   "lfs_sha256": "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452",
+   "lfs_size": 90405214,
+   "xet_hash": "f6041cb139310735d267939642554a0199a828a08edc37b0ddaf3b035eea5df4"
+  },
+  "onnx/model_O1.onnx": {
+   "size": 90360328,
+   "blob_id": "bb5d763143bc774b6fe626f8b5dd0f2d685f3630",
+   "lfs_sha256": "1391c6fc20b5530250bc15cbe1f47578ffeca55ab0551d335cc668b6299a88ec",
+   "lfs_size": 90360328,
+   "xet_hash": "512c239c65ad424aecb6defcf3c2625d2b9d90a1897cf6279d91fbb3225df0fa"
+  },
+  "onnx/model_O2.onnx": {
+   "size": 90326566,
+   "blob_id": "c803cb30515cd7d6bc8dbeb0d009f879301450ec",
+   "lfs_sha256": "1de3905029190b398c7d300b530e320cf4b5e7d3dfb9af1429ebd73fd9a16faf",
+   "lfs_size": 90326566,
+   "xet_hash": "82b70afedf6cc476b395f810066653b2010605cbee3212a371ab0cd754e389aa"
+  },
+  "onnx/model_O3.onnx": {
+   "size": 90326497,
+   "blob_id": "d4830defad5eb263b76329aa305b449071004e9c",
+   "lfs_sha256": "a44f671e364dddbac31f203f07b91be6b0a35e51936e5ebfab65b6d9538b83ff",
+   "lfs_size": 90326497,
+   "xet_hash": "b63e855b8e4b66733438f476d33cce359708286954270f059c68f1aeda197920"
+  },
+  "onnx/model_O4.onnx": {
+   "size": 45212349,
+   "blob_id": "676970039029655289c386687790ed7bfc7fb919",
+   "lfs_sha256": "1667d7f3ba669048b13a96ee3a44456d5e42c8f44588ae8b603430e16160c485",
+   "lfs_size": 45212349,
+   "xet_hash": "97c0cbab0dbbb7921fe6ea37b56d165265205edd81ae3cf7a85155649efc7cb8"
+  },
+  "onnx/model_qint8_arm64.onnx": {
+   "size": 23026053,
+   "blob_id": "31cb234cd3ea9b17b5806bad552fa59d7d05929b",
+   "lfs_sha256": "4278337fd0ff3c68bfb6291042cad8ab363e1d9fbc43dcb499fe91c871902474",
+   "lfs_size": 23026053,
+   "xet_hash": "35b363afb9df4b2003fa3154c65b08833ba4632fc938a11d5f0dcadd966dfe4a"
+  },
+  "onnx/model_qint8_avx512.onnx": {
+   "size": 23026053,
+   "blob_id": "31cb234cd3ea9b17b5806bad552fa59d7d05929b",
+   "lfs_sha256": "4278337fd0ff3c68bfb6291042cad8ab363e1d9fbc43dcb499fe91c871902474",
+   "lfs_size": 23026053,
+   "xet_hash": "35b363afb9df4b2003fa3154c65b08833ba4632fc938a11d5f0dcadd966dfe4a"
+  },
+  "onnx/model_qint8_avx512_vnni.onnx": {
+   "size": 23026053,
+   "blob_id": "31cb234cd3ea9b17b5806bad552fa59d7d05929b",
+   "lfs_sha256": "4278337fd0ff3c68bfb6291042cad8ab363e1d9fbc43dcb499fe91c871902474",
+   "lfs_size": 23026053,
+   "xet_hash": "35b363afb9df4b2003fa3154c65b08833ba4632fc938a11d5f0dcadd966dfe4a"
+  },
+  "onnx/model_quint8_avx2.onnx": {
+   "size": 23046789,
+   "blob_id": "7e0ad450c70c457e3d1fb2164d5efd251939d8cb",
+   "lfs_sha256": "b941bf19f1f1283680f449fa6a7336bb5600bdcd5f84d10ddc5cd72218a0fd21",
+   "lfs_size": 23046789,
+   "xet_hash": "17b2e95d67485210bf83575de4de17cad219aa0c3f5b1b2bc38aa12221d69b3d"
+  },
+  "openvino/openvino_model.bin": {
+   "size": 90265744,
+   "blob_id": "b706c3c25989b3595ebf22cfbb565e0e619dcb6b",
+   "lfs_sha256": "8b86cab4722e2aefab310cf96d4d5a9eb3b187f7d9670a082afc55c7fa0d392a",
+   "lfs_size": 90265744,
+   "xet_hash": "a7e4db70dd8ee1937cd9cce4014cc71260971a0ac88d43590de99de465389ee2"
+  },
+  "openvino/openvino_model.xml": {
+   "size": 211315,
+   "blob_id": "5d24a16700f0198908929370f59330fb8d486b1b"
+  },
+  "openvino/openvino_model_qint8_quantized.bin": {
+   "size": 22933664,
+   "blob_id": "7a3e2ea667afee1712b24ac4096126e029de7fdc",
+   "lfs_sha256": "c92ea4af3c6bc7b4a0f3b3d61b147c850f4dbdd7c9e7beee0c0c70dc12da289b",
+   "lfs_size": 22933664,
+   "xet_hash": "938fa026d38b01b5048a0ee1597e3a5f76838e08814688064b98d4fd08080d69"
+  },
+  "openvino/openvino_model_qint8_quantized.xml": {
+   "size": 368006,
+   "blob_id": "7152d195a075cf3f3dc3c3d6308d845f88e0117f"
+  },
+  "pytorch_model.bin": {
+   "size": 90888945,
+   "blob_id": "3417920b056b9a3d4257fba7a8bae5c5ae2910d6",
+   "lfs_sha256": "c3a85f238711653950f6a79ece63eb0ea93d76f6a6284be04019c53733baf256",
+   "lfs_size": 90888945,
+   "xet_hash": "340c711f718dcb27266d7d6584492af3d2384e6f5ce3cbdc8d11761cefb033d5"
+  },
+  "rust_model.ot": {
+   "size": 90887379,
+   "blob_id": "7c3e117e015025bc605669cc11546708105b6f97",
+   "lfs_sha256": "2d98d96d278348988f2744e6445b8bc16d921c3f6e17c667362f3cb353007aea",
+   "lfs_size": 90887379,
+   "xet_hash": "aaa2be7dcf4d404276b27028488280e13965c96819346a4e5ad67095d7990aa5"
+  },
+  "sentence_bert_config.json": {
+   "size": 53,
+   "blob_id": "59d594003bf59880a884c574bf88ef7555bb0202"
+  },
+  "special_tokens_map.json": {
+   "size": 112,
+   "blob_id": "e7b0375001f109a6b8873d756ad4f7bbb15fbaa5"
+  },
+  "tf_model.h5": {
+   "size": 91005696,
+   "blob_id": "9cc46352c6e0729b6d9a3ce65e4603a16a63a9f9",
+   "lfs_sha256": "24c06a7429b843d46e40c6b167122053921bf94dce2e5550ea5c07fabc597646",
+   "lfs_size": 91005696,
+   "xet_hash": "50328f4d0be4a9f30ef32a2580fcf3bbf509032a9b2a1beafa3cb6bd6efb1b1a"
+  },
+  "tokenizer.json": {
+   "size": 466247,
+   "blob_id": "cb202bfe2e3c98645018a6d12f182a434c9d3e02"
+  },
+  "tokenizer_config.json": {
+   "size": 350,
+   "blob_id": "c79f2b6a0cea6f4b564fed1938984bace9d30ff0"
+  },
+  "train_script.py": {
+   "size": 13156,
+   "blob_id": "82b47b6277499b8f17d139d0c651a6f961c06124"
+  },
+  "vocab.txt": {
+   "size": 231508,
+   "blob_id": "fb140275c155a9c7c5a3b3e0e77a9e839594a938"
+  }
+ }
+}
