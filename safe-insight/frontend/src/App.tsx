@@ -8,12 +8,13 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { getProject, verifyAudit, waitForBackend, getSetupStatus } from "./api";
+import { getProject, verifyAudit, waitForBackend, getSetupStatus, getHealth } from "./api";
 import ChatPanel from "./components/ChatPanel";
 import DocumentPanel from "./components/DocumentPanel";
 import OfflineBadge from "./components/OfflineBadge";
 import ProjectSidebar from "./components/ProjectSidebar";
 import SetupWizard from "./components/SetupWizard";
+import ModelSwitcher from "./components/ModelSwitcher";
 import type { DocumentInfo, HealthResponse, ChatMessage } from "./types";
 
 type BootState = "starting" | "ready" | "failed";
@@ -22,6 +23,7 @@ export default function App() {
   const [boot, setBoot] = useState<BootState>("starting");
   const [bootError, setBootError] = useState<string | null>(null);
   const [showSetup, setShowSetup] = useState(false);
+  const [showModelSwitcher, setShowModelSwitcher] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
@@ -172,9 +174,16 @@ export default function App() {
 
       <footer className="app__footer">
         <span className="muted small">
-          {health?.llm.model_present
-            ? `Model: ${health.llm.model_file}`
-            : "No language model - retrieval-only mode"}
+          <button 
+            type="button" 
+            className="btn--link" 
+            style={{ padding: 0, border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', textDecoration: 'underline' }}
+            onClick={() => setShowModelSwitcher(true)}
+          >
+            {health?.llm.model_present
+              ? `Model: ${health.llm.model_file}`
+              : "No language model - retrieval-only mode"}
+          </button>
           {health?.index.embedding_model ? ` · Embeddings: ${health.index.embedding_model}` : ""}
           {` · ${health?.index.vectors ?? 0} vectors indexed`}
           {` · ${health?.audit.query_count ?? 0} queries logged`}
@@ -184,6 +193,20 @@ export default function App() {
         </button>
         {auditNotice && <span className="muted small">{auditNotice}</span>}
       </footer>
+
+      {showModelSwitcher && (
+        <ModelSwitcher 
+          activeModelFile={health?.llm.model_file} 
+          onClose={async () => {
+            setShowModelSwitcher(false);
+            // Refresh health to get new active model status
+            try {
+              const status = await getHealth(); // using imported getHealth ? Wait, getHealth is not imported in App.tsx! But waitForBackend calls getHealth. Let's import getHealth.
+              setHealth(status);
+            } catch(e) {}
+          }} 
+        />
+      )}
     </div>
   );
 }

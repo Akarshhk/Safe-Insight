@@ -10,6 +10,7 @@ import httpx
 
 from app import config
 from app import network_guard
+from app import llm
 
 router = APIRouter(prefix="/setup", tags=["setup"])
 
@@ -72,6 +73,8 @@ def get_catalog_with_ram():
     ram_gb = psutil.virtual_memory().total / (1024 ** 3)
     for model in catalog:
         model["fits_ram"] = ram_gb >= model["min_ram_gb"]
+        model_path = config.MODELS_DIR / "llm" / model["filename"]
+        model["downloaded"] = model_path.exists() and model_path.stat().st_size > 10 * 1024 * 1024
     return catalog
 
 @router.get("/disk-space")
@@ -79,6 +82,28 @@ def disk_space():
     config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(config.MODELS_DIR)
     return {"free_bytes": usage.free, "free_gb": usage.free / (1024 ** 3)}
+
+@router.post("/switch-model")
+def switch_model(payload: dict):
+    filename = payload.get("filename")
+    if not filename:
+        raise HTTPException(status_code=400, detail="Filename required")
+    model_path = config.MODELS_DIR / "llm" / filename
+    if not model_path.exists():
+        raise HTTPException(status_code=404, detail="Model file not found on disk")
+    
+    # Optional RAM check could go here, but UI does it using /catalog
+    
+    # Hot swap
+    try:
+        llm.reload_llm(filename)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    
+    settings = get_settings()
+    settings["active_model_filename"] = filename
+    save_settings(settings)
+    return {"status": "ok", "active_model": filename}
 
 @router.post("/active-model")
 def set_active_model(payload: dict):

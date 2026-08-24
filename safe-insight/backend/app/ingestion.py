@@ -139,12 +139,41 @@ def _extract_text(path: Path) -> List[TextSegment]:
         raise ExtractionError(f"Could not read {path.name}: {exc}") from exc
     return [TextSegment(text=body, page_number=None)] if body.strip() else []
 
+def _extract_image(path: Path) -> List[TextSegment]:
+    """Extract text from an image using Tesseract OCR."""
+    try:
+        import pytesseract
+        from PIL import Image
+    except ImportError as exc:
+        raise ExtractionError(
+            "pytesseract and Pillow are not installed. Run: pip install -r requirements.txt"
+        ) from exc
+
+    # Quick test to see if tesseract binary is available on the system
+    try:
+        pytesseract.get_tesseract_version()
+    except Exception as exc:
+        raise ExtractionError(
+            "Tesseract OCR is not installed or not in PATH. Please install Tesseract (e.g. winget install tesseract-ocr) to support image paste."
+        ) from exc
+
+    try:
+        with Image.open(path) as img:
+            text = pytesseract.image_to_string(img)
+    except Exception as exc:
+        raise ExtractionError(f"Could not OCR image {path.name}: {exc}") from exc
+        
+    return [TextSegment(text=text, page_number=None)] if text.strip() else []
+
 
 _EXTRACTORS = {
     ".pdf": _extract_pdf,
     ".docx": _extract_docx,
     ".txt": _extract_text,
     ".md": _extract_text,
+    ".png": _extract_image,
+    ".jpg": _extract_image,
+    ".jpeg": _extract_image,
 }
 
 

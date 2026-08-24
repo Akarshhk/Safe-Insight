@@ -137,3 +137,14 @@ def add_message(project_id: str, role: str, content: str, citations: List[Dict[s
             "INSERT INTO messages (project_id, role, content, citations, created_at) VALUES (?, ?, ?, ?, ?)",
             (project_id, role, content, json.dumps(citations, ensure_ascii=False), _utc_now())
         )
+
+def get_recent_messages(project_id: str, limit: int = 10) -> List[Dict[str, str]]:
+    with _connect() as conn:
+        # Fetch the most recent `limit` messages, ordered by ID DESC
+        messages = conn.execute(
+            "SELECT role, content FROM messages WHERE project_id = ? ORDER BY id DESC LIMIT ?", 
+            (project_id, limit)
+        ).fetchall()
+        
+    # Reverse to return them in chronological order
+    return [{"role": m["role"], "content": m["content"]} for m in reversed(messages)]

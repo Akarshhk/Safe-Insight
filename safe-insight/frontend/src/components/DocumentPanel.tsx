@@ -7,7 +7,7 @@
  * is more useful than a single opaque spinner.
  */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { deleteDocument, uploadDocument } from "../api";
 import type { DocumentInfo } from "../types";
 
@@ -34,16 +34,17 @@ export default function DocumentPanel({ activeProjectId, documents, loading, onC
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  async function handleFiles(files: FileList | null) {
+  async function handleFiles(files: FileList | File[] | null) {
     if (!files || files.length === 0) return;
     setBusy(true);
     setError(null);
     setNotice(null);
 
+    const filesArray = Array.from(files);
     const messages: string[] = [];
-    for (let i = 0; i < files.length; i += 1) {
-      const file = files[i];
-      setProgress(`Indexing ${file.name} (${i + 1}/${files.length})...`);
+    for (let i = 0; i < filesArray.length; i += 1) {
+      const file = filesArray[i];
+      setProgress(`Indexing ${file.name} (${i + 1}/${filesArray.length})...`);
       try {
         if (!activeProjectId) throw new Error("No project selected");
         const result = await uploadDocument(activeProjectId, file);
@@ -82,6 +83,157 @@ export default function DocumentPanel({ activeProjectId, documents, loading, onC
       await onChanged();
     }
   }
+
+  useEffect(() => {
+    const ingestFromNativeClipboard = async (): Promise<boolean> => {
+      try {
+        const clipboard = await import('tauri-plugin-clipboard-api');
+        const { convertFileSrc } = await import('@tauri-apps/api/core');
+        
+        if (await clipboard.hasFiles()) {
+          const osFiles = await clipboard.readFiles();
+          if (osFiles && osFiles.length > 0) {
+            console.log("[Paste Debug] Found native files:", osFiles);
+            const files: File[] = [];
+            for (const path of osFiles) {
+              const url = convertFileSrc(path);
+              const response = await fetch(url);
+              const blob = await response.blob();
+              const filename = path.split(/[\\/]/).pop() || "unknown";
+              files.push(new File([blob], filename));
+            }
+            if (files.length > 0) {
+              await handleFiles(files);
+              return true;
+            }
+          }
+        }
+        
+        if (await clipboard.hasImage()) {
+          const imageBase64 = await clipboard.readImageBase64();
+          if (imageBase64) {
+            console.log("[Paste Debug] Found image from native clipboard");
+            const byteCharacters = atob(imageBase64);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {
+              byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            const blob = new Blob([byteArray], {type: 'image/png'});
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            const file = new File([blob], `Pasted screenshot - ${timestamp}.png`, { type: 'image/png' });
+            await handleFiles([file]);
+            return true;
+          }
+        }
+        
+        if (await clipboard.hasText()) {
+          const text = await clipboard.readText();
+          if (text && text.trim()) {
+            console.log("[Paste Debug] Found text from native clipboard");
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            const file = new File([text], `Pasted text - ${timestamp}.txt`, { type: "text/plain" });
+            await handleFiles([file]);
+            return true;
+          }
+        }
+      } catch (e) {
+        console.error("Tauri native clipboard read failed:", e);
+        setError(`Clipboard plugin error: ${String(e)}`);
+      }
+      return false;
+    };
+
+    const handlePaste = async (event: ClipboardEvent) => {
+      console.log("[Paste Debug] Paste event fired!", event);
+      if (!activeProjectId || busy) return;
+
+      const dt = event.clipboardData;
+      if (!dt) return;
+
+      // Try native first! Right-click paste doesn't trigger keydown.
+      const handledNatively = await ingestFromNativeClipboard();
+      if (handledNatively) {
+        event.preventDefault();
+        return;
+      }
+      
+      // Fallback to web APIs
+      if (dt.files && dt.files.length > 0) {
+        const filesArray = Array.from(dt.files);
+        const processedFiles = filesArray.map(f => {
+          if (f.type.startsWith("image/") && f.name === "image.png") {
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            return new File([f], `Pasted screenshot - ${timestamp}.png`, { type: f.type });
+          }
+          return f;
+        });
+        
+        if (processedFiles.length > 0) {
+          await handleFiles(processedFiles);
+          return;
+        }
+      }
+
+      // 2. Tauri native file clipboard reading for Windows File Explorer copies
+      try {
+        const { readFiles } = await import('@tauri-apps/plugin-clipboard-manager');
+        const { convertFileSrc } = await import('@tauri-apps/api/core');
+        
+        const osFiles = await readFiles();
+        if (osFiles && osFiles.length > 0) {
+          const files: File[] = [];
+          for (const path of osFiles) {
+            const url = convertFileSrc(path);
+            const response = await fetch(url);
+            const blob = await response.blob();
+            // Extract filename from path
+            const filename = path.split(/[\\/]/).pop() || "unknown";
+            files.push(new File([blob], filename));
+          }
+          if (files.length > 0) {
+            await handleFiles(files);
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn("Tauri clipboard manager read failed:", e);
+      }
+
+      // 3. Fallback to raw text
+      const text = dt.getData("text/plain");
+      if (text && text.trim()) {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const file = new File([text], `Pasted text - ${timestamp}.txt`, { type: "text/plain" });
+        await handleFiles([file]);
+      }
+    };
+
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+        // Don't intercept if user is pasting text into an input or textarea
+        const target = e.target as HTMLElement;
+        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+          return;
+        }
+        
+        console.log("[Paste Debug] Ctrl+V keydown intercepted!");
+        if (!activeProjectId || busy) return;
+        
+        const handled = await ingestFromNativeClipboard();
+        if (handled) {
+          e.preventDefault();
+        }
+      }
+    };
+
+    document.addEventListener("paste", handlePaste);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("paste", handlePaste);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [activeProjectId, busy]);
 
   const totalChunks = documents.reduce((sum, doc) => sum + doc.chunk_count, 0);
 

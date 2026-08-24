@@ -397,6 +397,7 @@ def query(project_id: str, request: QueryIn) -> Dict[str, Any]:
     is not an audit trail.
     """
     started = time.perf_counter()
+    logger.info("Received query. Strict mode: %s", request.strict_mode)
 
     try:
         query_vector = embeddings.embed_query(request.question)
@@ -420,10 +421,13 @@ def query(project_id: str, request: QueryIn) -> Dict[str, Any]:
     # so they don't pollute the context with irrelevant text for general chat.
     prompt_results = results if grounded else []
 
+    history = projects_db.get_recent_messages(project_id, limit=10)
+
     generation = llm.generate(
         request.question, 
         prompt_results,
         strict_mode=request.strict_mode,
+        history=history,
     )
 
     # Only show citations if the answer was grounded.

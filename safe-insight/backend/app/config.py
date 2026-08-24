@@ -96,10 +96,10 @@ os.environ.setdefault("HF_HOME", str(EMBEDDING_CACHE_DIR))
 # --------------------------------------------------------------------------- #
 #: Default generation model. Swap to "Llama-3.2-3B-Instruct-Q4_K_M.gguf" (or any
 #: other GGUF) by setting SAFE_INSIGHT_LLM_FILE, or by editing this line.
-LLM_MODEL_FILENAME: Final[str] = _env_str(
+LLM_MODEL_FILENAME: str = _env_str(
     "SAFE_INSIGHT_LLM_FILE", "Phi-3.5-mini-instruct-Q4_K_M.gguf"
 )
-LLM_MODEL_PATH: Final[Path] = Path(
+LLM_MODEL_PATH: Path = Path(
     _env_str("SAFE_INSIGHT_LLM_PATH", str(MODELS_DIR / "llm" / LLM_MODEL_FILENAME))
 )
 
@@ -141,7 +141,20 @@ MIN_SIMILARITY: Final[float] = _env_float("SAFE_INSIGHT_MIN_SIMILARITY", 0.20)
 #: this, the question is treated as a general/small-talk question.
 MIN_SIMILARITY_GROUNDED: Final[float] = _env_float("SAFE_INSIGHT_MIN_SIMILARITY_GROUNDED", 0.50)
 
-LLM_CONTEXT_TOKENS: Final[int] = _env_int("SAFE_INSIGHT_LLM_CTX", 4096)
+def _get_llm_context_tokens() -> int:
+    try:
+        import json
+        catalog_path = APP_DIR / "models_catalog.json"
+        with open(catalog_path, "r", encoding="utf-8") as f:
+            catalog = json.load(f)
+        for model in catalog:
+            if model.get("filename") == LLM_MODEL_FILENAME:
+                return model.get("n_ctx", 4096)
+    except Exception:
+        pass
+    return 4096
+
+LLM_CONTEXT_TOKENS: int = _env_int("SAFE_INSIGHT_LLM_CTX", _get_llm_context_tokens())
 LLM_MAX_OUTPUT_TOKENS: Final[int] = _env_int("SAFE_INSIGHT_LLM_MAX_TOKENS", 512)
 LLM_TEMPERATURE: Final[float] = _env_float("SAFE_INSIGHT_LLM_TEMPERATURE", 0.2)
 LLM_THREADS: Final[int] = _env_int(
@@ -169,7 +182,7 @@ ALLOWED_ORIGINS: Final[List[str]] = [
     "http://tauri.localhost",
 ]
 
-SUPPORTED_EXTENSIONS: Final[Set[str]] = {".pdf", ".docx", ".txt", ".md"}
+SUPPORTED_EXTENSIONS: set[str] = {".pdf", ".docx", ".txt", ".md", ".png", ".jpg", ".jpeg"}
 MAX_UPLOAD_BYTES: Final[int] = _env_int("SAFE_INSIGHT_MAX_UPLOAD_MB", 100) * 1024 * 1024
 
 #: When True the socket guard *raises* on any non-loopback connect attempt.

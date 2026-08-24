@@ -182,3 +182,11 @@ export function setActiveModel(filename: string): Promise<any> {
     body: JSON.stringify({ filename }),
   });
 }
+
+export function switchModel(filename: string): Promise<any> {
+  return request("/setup/switch-model", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename }),
+  });
+}

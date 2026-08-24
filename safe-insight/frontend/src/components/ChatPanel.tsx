@@ -31,6 +31,7 @@ export default function ChatPanel({ activeProjectId, hasDocuments, topK, onTopKC
   const [pending, setPending] = useState(false);
   const [strictMode, setStrictMode] = useState(false);
   const transcriptEnd = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     setMessages(initialMessages);
@@ -82,6 +83,10 @@ export default function ChatPanel({ activeProjectId, hasDocuments, topK, onTopKC
       ]);
     } finally {
       setPending(false);
+      // Wait for pending state to update the DOM, then refocus
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 0);
     }
   }
 
@@ -182,6 +187,7 @@ export default function ChatPanel({ activeProjectId, hasDocuments, topK, onTopKC
 
       <form className="composer" onSubmit={(event) => void submit(event)}>
         <textarea
+          ref={inputRef}
           value={input}
           rows={2}
           placeholder="Ask a question about your documents..."

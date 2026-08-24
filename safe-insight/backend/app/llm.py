@@ -135,6 +135,26 @@ def get_llm():
     return _llm
 
 
+def reload_llm(filename: str) -> None:
+    """Hot-swap the active model without restarting the backend."""
+    global _llm, _load_error
+    with _lock:
+        if _llm is not None:
+            # Drop the current reference; garbage collection frees the C structs.
+            _llm = None
+            
+        config.LLM_MODEL_FILENAME = filename
+        config.LLM_MODEL_PATH = config.MODELS_DIR / "llm" / filename
+        config.LLM_CONTEXT_TOKENS = config._get_llm_context_tokens()
+        
+        try:
+            _llm = _load_llm()
+            _load_error = None
+        except Exception as exc:  # noqa: BLE001
+            _load_error = str(exc)
+            raise LLMUnavailable(_load_error) from exc
+
+
 def is_loaded() -> bool:
     """True when the GGUF model is resident in memory."""
     return _llm is not None
@@ -194,6 +214,9 @@ def build_context_block(results: Sequence[SearchResult]) -> str:
 
 def build_prompt(question: str, results: Sequence[SearchResult]) -> str:
     """Assemble the user turn: context passages first, then the question."""
+    if not results:
+        return question
+        
     return (
         "Context passages:\n"
         "-----------------\n"
@@ -250,6 +273,7 @@ def generate(
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
     strict_mode: bool = False,
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> GenerationResult:
     """
     Generate a grounded answer from the retrieved chunks.
@@ -283,12 +307,41 @@ def generate(
 
     prompt = build_prompt(question, results)
     sys_prompt = SYSTEM_PROMPT if strict_mode else GENERAL_SYSTEM_PROMPT
+    
+    # Fast token estimation
+    def approx_tokens(text: str) -> int:
+        return len(text) // 4
+        
+    sys_tokens = approx_tokens(sys_prompt)
+    prompt_tokens = approx_tokens(prompt)
+    max_out = max_tokens or config.LLM_MAX_OUTPUT_TOKENS
+    
+    # Reserve tokens for current prompt, system prompt, and output.
+    # We also hard-cap history to ~1000 tokens to keep CPU inference fast.
+    available_history_tokens = min(
+        1000, 
+        config.LLM_CONTEXT_TOKENS - sys_tokens - prompt_tokens - max_out - 200
+    )
+    
+    trimmed_history = []
+    if history and available_history_tokens > 0:
+        history_tokens = 0
+        # Iterate from newest to oldest
+        for msg in reversed(history):
+            msg_tokens = approx_tokens(msg["content"])
+            if history_tokens + msg_tokens > available_history_tokens:
+                break
+            history_tokens += msg_tokens
+            trimmed_history.insert(0, msg)
+            
+    messages = [{"role": "system", "content": sys_prompt}]
+    if trimmed_history:
+        messages.extend(trimmed_history)
+    messages.append({"role": "user", "content": prompt})
+    
     try:
         response = llm.create_chat_completion(
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": prompt},
-            ],
+            messages=messages,
             max_tokens=max_tokens or config.LLM_MAX_OUTPUT_TOKENS,
             temperature=config.LLM_TEMPERATURE if temperature is None else temperature,
             # Small models sometimes start echoing the passage list; these stop
@@ -307,6 +360,14 @@ def generate(
 
     choice = response["choices"][0]
     usage = response.get("usage", {})
+    prompt_tokens = int(usage.get("prompt_tokens", 0))
+    
+    # Warn if we are approaching the context window limit
+    if prompt_tokens > config.LLM_CONTEXT_TOKENS * 0.85:
+        logger.warning(
+            f"Prompt size ({prompt_tokens} tokens) is approaching the context limit "
+            f"({config.LLM_CONTEXT_TOKENS} tokens). Consider reducing history or top_k."
+        )
     return GenerationResult(
         answer=(choice["message"]["content"] or "").strip(),
         model=config.LLM_MODEL_PATH.name,
@@ -322,6 +383,7 @@ __all__ = [
     "SYSTEM_PROMPT",
     "INSUFFICIENT_CONTEXT_ANSWER",
     "get_llm",
+    "reload_llm",
     "is_loaded",
     "status",
     "warm_up",

@@ -9,6 +9,7 @@ interface ModelEntry {
   min_ram_gb: number;
   description: string;
   fits_ram: boolean;
+  downloaded?: boolean;
 }
 
 interface SetupWizardProps {
@@ -96,6 +97,9 @@ export default function SetupWizard({ onComplete }: SetupWizardProps) {
               {!model.fits_ram && (
                 <p className="ram-warning">⚠️ This model exceeds your available RAM.</p>
               )}
+              {model.downloaded && (
+                <p className="status status--ok">Already downloaded</p>
+              )}
             </div>
           ))}
         </div>
@@ -113,7 +117,7 @@ export default function SetupWizard({ onComplete }: SetupWizardProps) {
             disabled={!selectedModel || catalog.length === 0} 
             onClick={startDownload}
           >
-            Download and Start
+            {catalog.find(m => m.id === selectedModel)?.downloaded ? "Start (Already Downloaded)" : "Download and Start"}
           </button>
         )}
       </div>

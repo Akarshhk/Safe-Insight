@@ -157,16 +157,14 @@ fn spawn_backend() -> Result<Child, String> {
 /// Exposed to the UI so it can show why the backend is missing, if it is.
 #[tauri::command]
 fn backend_status(state: State<'_, BackendProcess>) -> serde_json::Value {
-    let running = state
-        .0
-        .lock()
-        .map(|guard| guard.is_some())
-        .unwrap_or(false);
+    let running = state.0.lock().map(|guard| guard.is_some()).unwrap_or(false);
     serde_json::json!({ "spawned_by_shell": running, "url": "http://127.0.0.1:8765" })
 }
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_clipboard::init())
         .manage(BackendProcess(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![backend_status])
         .setup(|app| {

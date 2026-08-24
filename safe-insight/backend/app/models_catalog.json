@@ -8,7 +8,8 @@
     "description": "Fast and light. Good for quick Q&A and general study documents on modest hardware.",
     "repo": "bartowski/Phi-3.5-mini-instruct-GGUF",
     "filename": "Phi-3.5-mini-instruct-Q4_K_M.gguf",
-    "sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5"
+    "sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5",
+    "n_ctx": 8192
   },
   {
     "id": "balanced-llama31-q4",
@@ -19,7 +20,8 @@
     "description": "The recommended sweet spot. Excellent reasoning and comprehension for most use cases.",
     "repo": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
     "filename": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
-    "sha256": "7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c"
+    "sha256": "7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c",
+    "n_ctx": 8192
   },
   {
     "id": "rigorous-llama31-q8",
@@ -30,6 +32,7 @@
     "description": "High precision. Best for dense technical documents where nuance matters.",
     "repo": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
     "filename": "Meta-Llama-3.1-8B-Instruct-Q8_0.gguf",
-    "sha256": "9da71c45c90a821809821244d4971e5e5dfad7eb091f0b8ff0546392393b6283"
+    "sha256": "9da71c45c90a821809821244d4971e5e5dfad7eb091f0b8ff0546392393b6283",
+    "n_ctx": 8192
   }
 ]
