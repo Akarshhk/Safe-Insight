@@ -1,0 +1,3 @@
+[target.x86_64-pc-windows-gnu]
+linker = "C:\\Users\\akank\\winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64ucrt-13.0.0-r3\\mingw64\\bin\\gcc.exe"
+ar = "C:\\Users\\akank\\winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64ucrt-13.0.0-r3\\mingw64\\bin\\ar.exe"

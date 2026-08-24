@@ -18,9 +18,10 @@ import type { Citation, ChunkDetail } from "../types";
 
 interface Props {
   citations: Citation[];
+  projectId?: string | null;
 }
 
-export default function CitationList({ citations }: Props) {
+export default function CitationList({ citations, projectId }: Props) {
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   const [details, setDetails] = useState<Record<number, ChunkDetail>>({});
   const [loadingId, setLoadingId] = useState<number | null>(null);
@@ -38,9 +39,10 @@ export default function CitationList({ citations }: Props) {
 
     // Fetch the full chunk once, then serve it from the local cache.
     if (details[citation.vector_id]) return;
+    if (!projectId) return;
     setLoadingId(citation.vector_id);
     try {
-      const detail = await getChunk(citation.vector_id);
+      const detail = await getChunk(projectId, citation.vector_id);
       setDetails((current) => ({ ...current, [citation.vector_id]: detail }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

@@ -167,7 +167,7 @@ export default function ChatPanel({ activeProjectId, hasDocuments, topK, onTopKC
                 )}
 
                 {message.citations && message.citations.length > 0 && (
-                  <CitationList citations={message.citations} />
+                  <CitationList citations={message.citations} projectId={activeProjectId} />
                 )}
               </div>
             </div>

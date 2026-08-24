@@ -186,7 +186,8 @@ async def download_model(model_id: str, request: Request):
                     
                     if file_hash != model["sha256"]:
                         target_path.unlink()
-                        yield f"data: {json.dumps({'error': f'Checksum mismatch. Expected {model['sha256']}, got {file_hash}. File deleted.'})}\n\n"
+                        err_msg = f"Checksum mismatch. Expected {model['sha256']}, got {file_hash}. File deleted."
+                        yield f"data: {json.dumps({'error': err_msg})}\n\n"
                         return
 
                     # Set as active model automatically

@@ -66,7 +66,7 @@ export default function SetupWizard({ onComplete }: SetupWizardProps) {
       }
     };
 
-    source.onerror = (err) => {
+    source.onerror = () => {
       setError("Connection lost. You can try again to resume.");
       setDownloading(false);
       source.close();
