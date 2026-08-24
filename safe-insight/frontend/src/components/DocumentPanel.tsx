@@ -175,30 +175,6 @@ export default function DocumentPanel({ activeProjectId, documents, loading, onC
         }
       }
 
-      // 2. Tauri native file clipboard reading for Windows File Explorer copies
-      try {
-        const { readFiles } = await import('@tauri-apps/plugin-clipboard-manager');
-        const { convertFileSrc } = await import('@tauri-apps/api/core');
-        
-        const osFiles = await readFiles();
-        if (osFiles && osFiles.length > 0) {
-          const files: File[] = [];
-          for (const path of osFiles) {
-            const url = convertFileSrc(path);
-            const response = await fetch(url);
-            const blob = await response.blob();
-            // Extract filename from path
-            const filename = path.split(/[\\/]/).pop() || "unknown";
-            files.push(new File([blob], filename));
-          }
-          if (files.length > 0) {
-            await handleFiles(files);
-            return;
-          }
-        }
-      } catch (e) {
-        console.warn("Tauri clipboard manager read failed:", e);
-      }
 
       // 3. Fallback to raw text
       const text = dt.getData("text/plain");
