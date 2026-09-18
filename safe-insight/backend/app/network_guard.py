@@ -202,9 +202,8 @@ def _guarded_getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any
     if not _is_local_address(host):
         _record_violation(host, port, "socket.getaddrinfo")
         if config.STRICT_NETWORK_GUARD:
-            raise socket.gaierror(
-                socket.EAI_NONAME,
-                f"Safe Insight network guard blocked DNS resolution of {host!r}.",
+            raise OutboundNetworkBlocked(
+                f"Safe Insight network guard blocked DNS resolution of {host!r}."
             )
             
     result = _orig_getaddrinfo(host, port, *args, **kwargs)

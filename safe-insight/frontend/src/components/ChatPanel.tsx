@@ -112,6 +112,7 @@ export default function ChatPanel({ activeProjectId, hasDocuments, topK, onTopKC
               value={topK}
               onChange={(event) => onTopKChange(Number(event.target.value) || 1)}
             />
+            <span className="muted" style={{ fontSize: '0.75rem', marginTop: '0.25rem', display: 'block' }}>(fewer sources = faster answers)</span>
           </label>
         </div>
       </header>

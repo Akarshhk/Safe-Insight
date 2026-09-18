@@ -399,17 +399,23 @@ def query(project_id: str, request: QueryIn) -> Dict[str, Any]:
     started = time.perf_counter()
     logger.info("Received query. Strict mode: %s", request.strict_mode)
 
+    # 1. Embedding
+    t0 = time.perf_counter()
     try:
         query_vector = embeddings.embed_query(request.question)
     except embeddings.EmbeddingModelUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    t_embed = time.perf_counter() - t0
 
+    # 2. Retrieval
+    t0 = time.perf_counter()
     store = vector_store.get_store(project_id)
     results = store.search(
         query_vector,
         top_k=request.top_k,
         min_similarity=request.min_similarity,
     )
+    t_retrieve = time.perf_counter() - t0
 
     # Relevance check: if the best chunk is still below the threshold for grounding,
     # we treat it as an ungrounded query.
@@ -423,12 +429,15 @@ def query(project_id: str, request: QueryIn) -> Dict[str, Any]:
 
     history = projects_db.get_recent_messages(project_id, limit=10)
 
+    # 3. Generation
+    t0 = time.perf_counter()
     generation = llm.generate(
         request.question, 
         prompt_results,
         strict_mode=request.strict_mode,
         history=history,
     )
+    t_generate = time.perf_counter() - t0
 
     # Only show citations if the answer was grounded.
     if grounded:
@@ -439,6 +448,11 @@ def query(project_id: str, request: QueryIn) -> Dict[str, Any]:
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     serialised = [citation.to_dict() for citation in citation_list]
+    
+    logger.info(
+        "Query timing breakdown: embed=%.3fs, retrieve=%.3fs, assembly=%.3fs, prefill=%.3fs, generate=%.3fs, total=%.3fs",
+        t_embed, t_retrieve, generation.t_assembly, generation.t_prefill, generation.t_generation, latency_ms / 1000.0
+    )
 
     audit_id = audit_log.log_query(
         query=request.question,

@@ -158,11 +158,10 @@ LLM_CONTEXT_TOKENS: int = _env_int("SAFE_INSIGHT_LLM_CTX", _get_llm_context_toke
 LLM_MAX_OUTPUT_TOKENS: Final[int] = _env_int("SAFE_INSIGHT_LLM_MAX_TOKENS", 512)
 LLM_TEMPERATURE: Final[float] = _env_float("SAFE_INSIGHT_LLM_TEMPERATURE", 0.2)
 LLM_THREADS: Final[int] = _env_int(
-    "SAFE_INSIGHT_LLM_THREADS", max(1, (os.cpu_count() or 4) - 1)
+    "SAFE_INSIGHT_LLM_THREADS", max(1, (os.cpu_count() or 4) // 2)
 )
-#: 0 = pure CPU (the assumed 8 GB student laptop). Raise only if a GPU-enabled
-#: llama-cpp-python build is installed.
-LLM_GPU_LAYERS: Final[int] = _env_int("SAFE_INSIGHT_LLM_GPU_LAYERS", 0)
+#: -1 = offload all layers to GPU. Defaults to GPU if available.
+LLM_GPU_LAYERS: Final[int] = _env_int("SAFE_INSIGHT_LLM_GPU_LAYERS", -1)
 
 #: Character budget for the excerpt shown next to each citation in the UI.
 CITATION_EXCERPT_CHARS: Final[int] = _env_int("SAFE_INSIGHT_CITATION_EXCERPT_CHARS", 400)

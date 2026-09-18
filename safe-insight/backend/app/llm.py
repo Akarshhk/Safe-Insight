@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 
@@ -79,6 +80,9 @@ class GenerationResult:
     model: str
     prompt_tokens: int
     completion_tokens: int
+    t_assembly: float = 0.0
+    t_prefill: float = 0.0
+    t_generation: float = 0.0
     stub: bool = False
     finish_reason: Optional[str] = None
 
@@ -305,6 +309,7 @@ def generate(
     except LLMUnavailable:
         return _stub_answer(question, results)
 
+    t_assembly_start = time.perf_counter()
     prompt = build_prompt(question, results)
     sys_prompt = SYSTEM_PROMPT if strict_mode else GENERAL_SYSTEM_PROMPT
     
@@ -313,14 +318,14 @@ def generate(
         return len(text) // 4
         
     sys_tokens = approx_tokens(sys_prompt)
-    prompt_tokens = approx_tokens(prompt)
+    prompt_tokens_est = approx_tokens(prompt)
     max_out = max_tokens or config.LLM_MAX_OUTPUT_TOKENS
     
     # Reserve tokens for current prompt, system prompt, and output.
     # We also hard-cap history to ~1000 tokens to keep CPU inference fast.
     available_history_tokens = min(
         1000, 
-        config.LLM_CONTEXT_TOKENS - sys_tokens - prompt_tokens - max_out - 200
+        config.LLM_CONTEXT_TOKENS - sys_tokens - prompt_tokens_est - max_out - 200
     )
     
     trimmed_history = []
@@ -338,16 +343,44 @@ def generate(
     if trimmed_history:
         messages.extend(trimmed_history)
     messages.append({"role": "user", "content": prompt})
+    t_assembly = time.perf_counter() - t_assembly_start
     
+    t_prefill_start = time.perf_counter()
     try:
-        response = llm.create_chat_completion(
+        response_stream = llm.create_chat_completion(
             messages=messages,
-            max_tokens=max_tokens or config.LLM_MAX_OUTPUT_TOKENS,
+            max_tokens=max_out,
             temperature=config.LLM_TEMPERATURE if temperature is None else temperature,
             # Small models sometimes start echoing the passage list; these stop
             # sequences cut that off early rather than burning the token budget.
             stop=["\nContext passages:", "\nQuestion:"],
+            stream=True,
         )
+        
+        try:
+            first_chunk = next(response_stream)
+        except StopIteration:
+            first_chunk = None
+        
+        t_prefill = time.perf_counter() - t_prefill_start
+        
+        content = ""
+        finish_reason = None
+        usage = {}
+        if first_chunk:
+            if "choices" in first_chunk and len(first_chunk["choices"]) > 0:
+                content += first_chunk["choices"][0]["delta"].get("content", "")
+            
+            for chunk in response_stream:
+                if "choices" in chunk and len(chunk["choices"]) > 0:
+                    content += chunk["choices"][0]["delta"].get("content", "")
+                    if chunk["choices"][0].get("finish_reason"):
+                        finish_reason = chunk["choices"][0]["finish_reason"]
+                if "usage" in chunk and chunk["usage"]:
+                    usage = chunk["usage"]
+        
+        t_generation = time.perf_counter() - t_prefill_start - t_prefill
+        
     except Exception as exc:  # noqa: BLE001 - native errors surface as RuntimeError
         logger.exception("Generation failed")
         return GenerationResult(
@@ -358,9 +391,8 @@ def generate(
             finish_reason="error",
         )
 
-    choice = response["choices"][0]
-    usage = response.get("usage", {})
     prompt_tokens = int(usage.get("prompt_tokens", 0))
+    completion_tokens = int(usage.get("completion_tokens", 0))
     
     # Warn if we are approaching the context window limit
     if prompt_tokens > config.LLM_CONTEXT_TOKENS * 0.85:
@@ -369,11 +401,14 @@ def generate(
             f"({config.LLM_CONTEXT_TOKENS} tokens). Consider reducing history or top_k."
         )
     return GenerationResult(
-        answer=(choice["message"]["content"] or "").strip(),
+        answer=content.strip(),
         model=config.LLM_MODEL_PATH.name,
-        prompt_tokens=int(usage.get("prompt_tokens", 0)),
-        completion_tokens=int(usage.get("completion_tokens", 0)),
-        finish_reason=choice.get("finish_reason"),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        t_assembly=t_assembly,
+        t_prefill=t_prefill,
+        t_generation=t_generation,
+        finish_reason=finish_reason,
     )
 
 
