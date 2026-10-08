@@ -9,7 +9,6 @@
 
 import type {
   ChunkDetail,
-  DocumentListResponse,
   HealthResponse,
   IngestResponse,
   OfflineStatus,
@@ -51,18 +50,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     );
   }
 
-  if (!response.ok) {
-    let detail = `${response.status} ${response.statusText}`;
-    try {
-      const body = await response.json();
-      if (body && typeof body.detail === "string") detail = body.detail;
-    } catch {
-      // Non-JSON error body; keep the status line we already have.
-    }
-    throw new ApiError(detail, response.status);
-  }
+  if (!response.ok) throw await errorFromResponse(response);
 
   return (await response.json()) as T;
+}
+
+/** Turn a non-2xx response into an ApiError carrying FastAPI's `detail`. */
+async function errorFromResponse(response: Response): Promise<ApiError> {
+  let detail = `${response.status} ${response.statusText}`;
+  try {
+    const body = await response.json();
+    if (body && typeof body.detail === "string") detail = body.detail;
+  } catch {
+    // Non-JSON error body; keep the status line we already have.
+  }
+  return new ApiError(detail, response.status);
 }
 
 /** Full backend status - index counts, model state, audit stats, offline check. */
@@ -101,10 +103,6 @@ export function deleteProject(projectId: string): Promise<any> {
   return request(`/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
 }
 
-export function listDocuments(): Promise<DocumentListResponse> {
-  return request<DocumentListResponse>("/documents"); // Note: there is no global /documents endpoint anymore, we need to remove this or scope it
-}
-
 export function uploadDocument(projectId: string, file: File): Promise<IngestResponse> {
   const form = new FormData();
   form.append("file", file);
@@ -122,6 +120,100 @@ export function askQuestion(projectId: string, question: string, topK: number, s
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question, top_k: topK, strict_mode: strictMode }),
   });
+}
+
+/** One line of the streaming endpoint's newline-delimited JSON. */
+type StreamEvent =
+  | { type: "token"; text: string }
+  | { type: "ping" }
+  | ({ type: "done" } & QueryResponse)
+  | { type: "error"; detail: string };
+
+/**
+ * The backend pings every 3 s while it has nothing else to send (e.g. while the
+ * model reads a long prompt), so this much silence means it has gone away.
+ */
+const STREAM_SILENCE_MS = 20_000;
+
+/**
+ * Ask a question and receive the answer while it is being written.
+ *
+ * Built never to hang: silence beyond STREAM_SILENCE_MS, a dropped connection,
+ * or a stream that ends without its final event all reject with an ApiError.
+ * Aborting `signal` (the Stop button) rejects too - and closing the connection
+ * makes the backend stop generating, so the next question is not kept waiting.
+ *
+ * Resolves with the same body as `askQuestion`; its `answer` is authoritative
+ * (it can carry an end note such as "[Answer cut off at the length limit.]").
+ */
+export async function askQuestionStream(
+  projectId: string,
+  question: string,
+  topK: number,
+  strictMode: boolean,
+  onToken: (text: string) => void,
+  signal: AbortSignal,
+): Promise<QueryResponse> {
+  const controller = new AbortController();
+  const stopFromCaller = () => controller.abort();
+  signal.addEventListener("abort", stopFromCaller);
+  let silence: ReturnType<typeof setTimeout> | undefined;
+  let silent = false;
+  const resetSilence = () => {
+    clearTimeout(silence);
+    silence = setTimeout(() => {
+      silent = true;
+      controller.abort();
+    }, STREAM_SILENCE_MS);
+  };
+
+  try {
+    resetSilence();
+    const response = await fetch(
+      `${BASE_URL}/projects/${encodeURIComponent(projectId)}/query/stream`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, top_k: topK, strict_mode: strictMode }),
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok || !response.body) throw await errorFromResponse(response);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      resetSilence();
+      buffered += decoder.decode(value, { stream: true });
+      let newline: number;
+      while ((newline = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, newline).trim();
+        buffered = buffered.slice(newline + 1);
+        if (!line) continue;
+        const event = JSON.parse(line) as StreamEvent;
+        if (event.type === "token") onToken(event.text);
+        else if (event.type === "done") return event;
+        else if (event.type === "error") throw new ApiError(event.detail, 500);
+      }
+    }
+    throw new ApiError("The connection to the backend closed before the answer finished.", 0);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (silent) {
+      throw new ApiError("The backend stopped responding, so the answer was abandoned.", 0);
+    }
+    if (signal.aborted) throw error; // the caller's own Stop
+    throw new ApiError(
+      "Lost the connection to the Safe Insight backend. It may have stopped - check the terminal.",
+      0,
+    );
+  } finally {
+    clearTimeout(silence);
+    signal.removeEventListener("abort", stopFromCaller);
+  }
 }
 
 /** Untruncated source text behind a citation - fetched when the user expands it. */

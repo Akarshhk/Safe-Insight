@@ -1,4 +1,5 @@
 import json
+import os
 import psutil
 import shutil
 import hashlib
@@ -66,6 +67,19 @@ def setup_status():
         "model_present": llm_present and emb_present,
         "active_model": active_filename if llm_present else None
     }
+
+def apply_saved_model() -> None:
+    """
+    Point the LLM at the model the user picked in the UI, so a restart loads it.
+
+    Call before ``llm.warm_up()``. An explicit SAFE_INSIGHT_LLM_FILE /
+    SAFE_INSIGHT_LLM_PATH in the environment still wins.
+    """
+    if os.environ.get("SAFE_INSIGHT_LLM_FILE", "").strip() or os.environ.get("SAFE_INSIGHT_LLM_PATH", "").strip():
+        return
+    active = setup_status()["active_model"]
+    if active:
+        llm.use_model_file(active)
 
 @router.get("/catalog")
 def get_catalog_with_ram():
@@ -184,9 +198,10 @@ async def download_model(model_id: str, request: Request):
 
                     file_hash = await asyncio.to_thread(verify)
                     
-                    if file_hash != model["sha256"]:
+                    expected_hash = model["sha256"]
+                    if file_hash != expected_hash:
                         target_path.unlink()
-                        yield f"data: {json.dumps({'error': f'Checksum mismatch. Expected {model['sha256']}, got {file_hash}. File deleted.'})}\n\n"
+                        yield f"data: {json.dumps({'error': f'Checksum mismatch. Expected {expected_hash}, got {file_hash}. File deleted.'})}\n\n"
                         return
 
                     # Set as active model automatically
@@ -201,13 +216,17 @@ async def download_model(model_id: str, request: Request):
                         from huggingface_hub import snapshot_download
                         
                         # The huggingface_hub module caches HF_HUB_OFFLINE at import time (when the server booted).
-                        # We must actively override the module constant to unstick it for this download thread.
+                        # We must actively override the module constant to unstick it for this download thread,
+                        # and put it back afterwards so the rest of the process stays offline.
+                        was_offline = hc.HF_HUB_OFFLINE
                         hc.HF_HUB_OFFLINE = False
-                        
-                        snapshot_download(
-                            config.EMBEDDING_MODEL_NAME,
-                            cache_dir=str(config.EMBEDDING_CACHE_DIR)
-                        )
+                        try:
+                            snapshot_download(
+                                config.EMBEDDING_MODEL_NAME,
+                                cache_dir=str(config.EMBEDDING_CACHE_DIR)
+                            )
+                        finally:
+                            hc.HF_HUB_OFFLINE = was_offline
                         
                     try:
                         await asyncio.to_thread(download_emb)

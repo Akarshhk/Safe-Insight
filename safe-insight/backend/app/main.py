@@ -19,28 +19,38 @@ Startup order matters and is not accidental:
 
 API surface
 -----------
-========================================  ==========================================
-``GET  /health``                          full status blob
-``GET  /health/offline-check``            offline badge data
-``POST /documents``                       upload + ingest + index one file
-``GET  /documents``                       list indexed documents
-``DELETE /documents/{doc_id}``            remove a document and its vectors
-``GET  /documents/{doc_id}/chunks``       every chunk of one document
-``POST /query``                           ask a question, get answer + citations
-``GET  /chunks/{vector_id}``              untruncated source text for a citation
-``GET  /audit/queries``                   recent audit entries
-``GET  /audit/verify``                    verify the audit hash chain
-``POST /audit/export``                    dump the audit log to JSON Lines
-========================================  ==========================================
+Everything under ``/projects/{id}`` 404s for an unknown project id.
+
+=================================================  ===================================
+``GET  /health``                                   full status blob
+``GET  /health/offline-check``                     offline badge data
+``POST /projects`` / ``GET /projects``             create / list projects
+``GET  /projects/{id}``                            documents + chat history
+``DELETE /projects/{id}``                          remove a project and its files
+``POST /projects/{id}/documents``                  upload + ingest + index one file
+``DELETE /projects/{id}/documents/{doc_id}``       remove a document and its vectors
+``GET  /projects/{id}/documents/{doc_id}/chunks``  every chunk of one document
+``POST /projects/{id}/query``                      ask a question, get answer + citations
+``GET  /projects/{id}/chunks/{vector_id}``         untruncated source text for a citation
+``GET  /audit/queries``                            recent audit entries
+``GET  /audit/verify``                             verify the audit hash chain
+``POST /audit/export``                             dump the audit log to JSON Lines
+``/setup/...``                                     model catalog, download, switch
+=================================================  ===================================
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import queue
 import shutil
 import tempfile
+import threading
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
@@ -53,24 +63,24 @@ from app import network_guard
 network_guard.install_guard()
 
 # 3. Everything else may now be imported safely.
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
-from app import audit_log, citations as citations_mod, embeddings, ingestion, llm, projects_db, setup, vector_store
+from app import audit_log, citations as citations_mod, embeddings, ingestion, llm, projects_db, references, setup, vector_store
 from app.schemas import (
     AuditListOut,
     AuditVerifyOut,
     ChunkOut,
     DeleteOut,
-    DocumentListOut,
-    DocumentOut,
     HealthOut,
     IngestOut,
     OfflineCheckOut,
     QueryIn,
     QueryOut,
 )
-from app.vector_store import VectorStoreError
+from app.vector_store import DocumentRecord, SearchResult, VectorStoreError
 
 VERSION = "0.1.0"
 
@@ -104,6 +114,8 @@ async def lifespan(app: FastAPI):
     # Warm the embedding model first: the vector store needs its dimension.
     embeddings.warm_up()
 
+    # Load the model chosen in the setup wizard / model switcher, not the default.
+    setup.apply_saved_model()
     llm.warm_up()
     logger.info("Ready on http://%s:%d", config.HOST, config.PORT)
 
@@ -142,7 +154,9 @@ def health() -> Dict[str, Any]:
         "status": "ok",
         "version": VERSION,
         "offline": network_guard.get_status(),
-        "index": {"loaded": True}, # legacy payload
+        # Per-project counts come from GET /projects/{id}; the embedding model
+        # is shared by every project.
+        "index": {"embedding_model": embeddings.model_name()},
         "llm": llm.status(),
         "audit": audit_log.stats(),
         "embedding_model_loaded": embeddings.is_loaded(),
@@ -172,6 +186,16 @@ from pydantic import BaseModel
 
 class CreateProjectIn(BaseModel):
     name: str
+
+def _require_project(project_id: str) -> None:
+    """
+    404 for unknown project ids.
+
+    The id becomes a directory name under PROJECTS_DIR, so only ids this app
+    created (UUIDs in the projects table) may reach the filesystem.
+    """
+    if not projects_db.project_exists(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
 
 @app.post("/projects", tags=["projects"], status_code=201)
 def create_project(payload: CreateProjectIn) -> Dict[str, Any]:
@@ -208,17 +232,30 @@ def get_project(project_id: str) -> Dict[str, Any]:
 
 @app.delete("/projects/{project_id}", tags=["projects"])
 def delete_project(project_id: str) -> Dict[str, Any]:
+    _require_project(project_id)
     projects_db.delete_project(project_id)
-    vector_store.delete_store(project_id)
+    removed = vector_store.delete_store(project_id)
+    # Keep the ingest/delete history complete, as a single-document delete would.
+    for record in removed:
+        audit_log.log_document_event(
+            action="delete",
+            doc_id=record.doc_id,
+            filename=record.filename,
+            detail={"project_id": project_id, "reason": "project deleted"},
+        )
     return {"status": "deleted", "id": project_id}
 
 # --------------------------------------------------------------------------- #
 # Documents
 # --------------------------------------------------------------------------- #
 @app.post("/projects/{project_id}/documents", response_model=IngestOut, tags=["documents"], status_code=201)
-async def upload_document(project_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
+def upload_document(project_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
     """
     Ingest one document: extract -> chunk -> embed -> index.
+
+    A plain ``def`` on purpose: FastAPI runs it on a worker thread. As an
+    ``async def`` the extraction and embedding ran on the event loop and every
+    other request (badge, project list, questions) waited for the whole ingest.
 
     The upload is streamed to a temp file first so a large PDF never sits fully
     in memory, and so ingestion works on a real path (PyMuPDF wants one).
@@ -226,6 +263,7 @@ async def upload_document(project_id: str, file: UploadFile = File(...)) -> Dict
     Duplicate uploads (same SHA-256) are rejected with the existing ``doc_id``
     rather than indexed twice, which would over-weight that content at retrieval.
     """
+    _require_project(project_id)
     started = time.perf_counter()
     filename = file.filename or "upload"
     suffix = Path(filename).suffix.lower()
@@ -301,31 +339,9 @@ async def upload_document(project_id: str, file: UploadFile = File(...)) -> Dict
     except VectorStoreError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
-        await file.close()
+        file.file.close()
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
-
-
-@app.get("/documents", response_model=DocumentListOut, tags=["documents"])
-def list_documents() -> Dict[str, Any]:
-    """Every indexed document, newest first."""
-    records = store.list_documents()
-    return {
-        "documents": [
-            DocumentOut(
-                doc_id=record.doc_id,
-                filename=record.filename,
-                file_type=record.file_type,
-                size_bytes=record.size_bytes,
-                sha256=record.sha256,
-                page_count=record.page_count,
-                chunk_count=record.chunk_count,
-                ingested_at=record.ingested_at,
-            )
-            for record in records
-        ],
-        "total_chunks": sum(record.chunk_count for record in records),
-    }
 
 
 @app.delete("/projects/{project_id}/documents/{doc_id}", response_model=DeleteOut, tags=["documents"])
@@ -337,6 +353,7 @@ def delete_document(project_id: str, doc_id: str) -> Dict[str, Any]:
     that a query happened against that document, which is the whole point of an
     audit trail. Deleting the document removes it from future retrieval only.
     """
+    _require_project(project_id)
     store = vector_store.get_store(project_id)
     record = store.get_document(doc_id)
     if record is None:
@@ -356,6 +373,7 @@ def delete_document(project_id: str, doc_id: str) -> Dict[str, Any]:
 @app.get("/projects/{project_id}/documents/{doc_id}/chunks", tags=["documents"])
 def document_chunks(project_id: str, doc_id: str) -> Dict[str, Any]:
     """All chunks of one document, in reading order (useful for debugging)."""
+    _require_project(project_id)
     store = vector_store.get_store(project_id)
     if store.get_document(doc_id) is None:
         raise HTTPException(status_code=404, detail=f"No document with id {doc_id}")
@@ -377,25 +395,42 @@ def document_chunks(project_id: str, doc_id: str) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Query - the core RAG pipeline
 # --------------------------------------------------------------------------- #
-@app.post("/projects/{project_id}/query", response_model=QueryOut, tags=["query"])
-def query(project_id: str, request: QueryIn) -> Dict[str, Any]:
+def _opening_passages(
+    results: List[SearchResult], targets: List[DocumentRecord]
+) -> List[SearchResult]:
     """
-    Answer a question from the indexed documents.
+    The first passages of each target document, in reading order.
 
-    Pipeline, in order:
-
-    1. embed the question locally (:mod:`app.embeddings`),
-    2. retrieve the top-k most similar chunks above the similarity floor
-       (:mod:`app.vector_store`),
-    3. build a grounded prompt containing *only* those chunks and generate
-       (:mod:`app.llm`),
-    4. build the citation trail and mark which citations the answer used
-       (:mod:`app.citations`),
-    5. append the whole interaction to the local audit log (:mod:`app.audit_log`).
-
-    Step 5 happens for every query, including refusals - an audit trail with gaps
-    is not an audit trail.
+    Two for a single document (enough to say what it is about), one each when
+    several are named - every passage costs seconds of reading on a CPU.
     """
+    per_doc = 2 if len(targets) == 1 else 1
+    opening: List[SearchResult] = []
+    for doc in targets:
+        in_order = sorted(
+            (r for r in results if r.chunk.doc_id == doc.doc_id),
+            key=lambda r: r.chunk.chunk_index,
+        )
+        opening.extend(in_order[:per_doc])
+    return opening[:3]
+
+
+@dataclass
+class _PreparedQuery:
+    """Everything decided before generation; shared by /query and /query/stream."""
+
+    started: float
+    results: List[SearchResult]          # what retrieval considered (audit log)
+    prompt_results: List[SearchResult]   # what the model is given (citations)
+    grounded: bool
+    history: List[Dict[str, str]]
+    documents: List[str]
+    t_embed: float
+    t_retrieve: float
+
+
+def _prepare_query(project_id: str, request: QueryIn) -> _PreparedQuery:
+    """Steps 1-2 of the pipeline: embed, retrieve, choose the passages."""
     started = time.perf_counter()
     logger.info("Received query. Strict mode: %s", request.strict_mode)
 
@@ -410,41 +445,94 @@ def query(project_id: str, request: QueryIn) -> Dict[str, Any]:
     # 2. Retrieval
     t0 = time.perf_counter()
     store = vector_store.get_store(project_id)
-    results = store.search(
-        query_vector,
-        top_k=request.top_k,
-        min_similarity=request.min_similarity,
-    )
+    documents = store.list_documents()
+    # A question that names a file ("what's in resume.pdf?") or points at one
+    # ("what is this doc about?") is about that document, whatever it matches.
+    targets = references.referred_documents(request.question, documents)
+    if targets:
+        results = store.search_documents(query_vector, [doc.doc_id for doc in targets])
+    else:
+        results = store.search(
+            query_vector,
+            top_k=request.top_k,
+            min_similarity=request.min_similarity,
+        )
+    # A passage that is only a slide heading matches almost any question.
+    results = [r for r in results if len(r.chunk.text.split()) >= config.MIN_PASSAGE_WORDS]
     t_retrieve = time.perf_counter() - t0
 
     # Relevance check: if the best chunk is still below the threshold for grounding,
-    # we treat it as an ungrounded query.
-    grounded = False
-    if results and results[0].score >= config.MIN_SIMILARITY_GROUNDED:
-        grounded = True
-    
+    # we treat it as an ungrounded query - unless the question is about a named
+    # document, which is grounded in that document by definition.
+    best = results[0].score if results else 0.0
+    grounded = bool(results) and (bool(targets) or best >= config.MIN_SIMILARITY_GROUNDED)
+
     # If it's not grounded, and we're not in strict mode, we drop the retrieved chunks
     # so they don't pollute the context with irrelevant text for general chat.
-    prompt_results = results if grounded else []
-
-    history = projects_db.get_recent_messages(project_id, limit=10)
-
-    # 3. Generation
-    t0 = time.perf_counter()
-    generation = llm.generate(
-        request.question, 
-        prompt_results,
-        strict_mode=request.strict_mode,
-        history=history,
-    )
-    t_generate = time.perf_counter() - t0
-
-    # Only show citations if the answer was grounded.
-    if grounded:
-        citation_list = citations_mod.build_citations(results)
-        citations_mod.mark_referenced(citation_list, generation.answer)
+    # When it is grounded, only passages close to the best match go to the model:
+    # reading each passage costs seconds on a CPU.
+    if not grounded:
+        prompt_results = []
+    elif targets and best < config.MIN_SIMILARITY_GROUNDED:
+        # A vague question about the document ("what is it about?") matches no
+        # passage well, so give the model the document's opening instead.
+        prompt_results = _opening_passages(results, targets)
     else:
-        citation_list = []
+        prompt_results = [
+            r for r in results if r.score >= best - config.RELEVANCE_MARGIN
+        ][: request.top_k]
+    if targets:
+        # Searching a named document scores all its chunks; keep the log to the
+        # best few plus whatever the model was given.
+        shown = {r.chunk.vector_id for r in prompt_results}
+        results = [r for i, r in enumerate(results) if i < request.top_k or r.chunk.vector_id in shown]
+
+    # The last two exchanges are enough for follow-ups; more history only
+    # makes every answer slower (see llm.generate).
+    history = projects_db.get_recent_messages(project_id, limit=4)
+
+    return _PreparedQuery(
+        started=started,
+        results=results,
+        prompt_results=prompt_results,
+        grounded=grounded,
+        history=history,
+        documents=[doc.filename for doc in documents],
+        t_embed=t_embed,
+        t_retrieve=t_retrieve,
+    )
+
+
+def _generate(
+    request: QueryIn, prepared: _PreparedQuery, **streaming: Any
+) -> llm.GenerationResult:
+    """Step 3: generate. ``streaming`` is passed through (on_token, should_stop)."""
+    return llm.generate(
+        request.question,
+        prepared.prompt_results,
+        strict_mode=request.strict_mode,
+        history=prepared.history,
+        documents=prepared.documents,
+        **streaming,
+    )
+
+
+def _finish_query(
+    project_id: str,
+    request: QueryIn,
+    prepared: _PreparedQuery,
+    generation: llm.GenerationResult,
+) -> Dict[str, Any]:
+    """Steps 4-5: citations, audit entry, chat history. Returns the response body."""
+    started, results, prompt_results, grounded = (
+        prepared.started, prepared.results, prepared.prompt_results, prepared.grounded
+    )
+    t_embed, t_retrieve = prepared.t_embed, prepared.t_retrieve
+
+    # Citations are exactly the passages the model was given, numbered as in the
+    # prompt, so [n] in the answer is citation n. Empty when not grounded.
+    citation_list = citations_mod.build_citations(prompt_results)
+    citations_mod.mark_referenced(citation_list, generation.answer)
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     serialised = [citation.to_dict() for citation in citation_list]
@@ -468,6 +556,7 @@ def query(project_id: str, request: QueryIn) -> Dict[str, Any]:
         completion_tokens=generation.completion_tokens,
         stub_mode=generation.stub,
         grounded=grounded,
+        project_id=project_id,
     )
 
     projects_db.add_message(project_id, "user", request.question)
@@ -482,10 +571,115 @@ def query(project_id: str, request: QueryIn) -> Dict[str, Any]:
         "model": generation.model,
         "embedding_model": embeddings.model_name(),
         "top_k": request.top_k,
-        "retrieved_count": len(results),
+        # Passages the answer was built from; the audit log keeps every retrieved id.
+        "retrieved_count": len(prompt_results),
         "latency_ms": latency_ms,
         "audit_id": audit_id,
     }
+
+
+@app.post("/projects/{project_id}/query", response_model=QueryOut, tags=["query"])
+def query(project_id: str, request: QueryIn) -> Dict[str, Any]:
+    """
+    Answer a question from the indexed documents.
+
+    Pipeline, in order:
+
+    1. embed the question locally (:mod:`app.embeddings`),
+    2. retrieve the top-k most similar chunks above the similarity floor
+       (:mod:`app.vector_store`),
+    3. build a grounded prompt containing *only* those chunks and generate
+       (:mod:`app.llm`),
+    4. build the citation trail and mark which citations the answer used
+       (:mod:`app.citations`),
+    5. append the whole interaction to the local audit log (:mod:`app.audit_log`).
+
+    Step 5 happens for every query, including refusals - an audit trail with gaps
+    is not an audit trail.
+    """
+    _require_project(project_id)
+    prepared = _prepare_query(project_id, request)
+    return _finish_query(project_id, request, prepared, _generate(request, prepared))
+
+
+#: While nothing else is being sent, the stream says "still here" this often, so
+#: the UI can tell a slow prompt read from a backend that has gone away.
+_STREAM_PING_SECONDS = 3.0
+#: If nothing has read the stream for this long, the client is gone even if the
+#: server was never told; stop generating rather than keep the model busy.
+_STREAM_ABANDONED_SECONDS = 10.0
+
+
+@app.post("/projects/{project_id}/query/stream", tags=["query"])
+async def query_stream(project_id: str, request: QueryIn, http_request: Request) -> StreamingResponse:
+    """
+    Same as ``POST /query``, but the answer arrives while it is being written.
+
+    The body is newline-delimited JSON, one event per line::
+
+        {"type": "token", "text": "..."}   the next piece of the answer
+        {"type": "ping"}                   keep-alive while nothing else is sent
+        {"type": "done", ...}              the full /query response; its answer is final
+        {"type": "error", "detail": "..."}
+
+    The answer is written on its own thread. If the client goes away mid-answer
+    (Stop button, project switch, window closed), generation stops at the next
+    token - so the next question never waits behind an answer nobody is reading -
+    and what was written is still logged, marked as stopped.
+    """
+    await run_in_threadpool(_require_project, project_id)
+    # Before the stream starts, so e.g. a missing embedding model is a plain 503.
+    prepared = await run_in_threadpool(_prepare_query, project_id, request)
+
+    events: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+    stop = threading.Event()
+    pulled_at = time.monotonic()
+
+    def should_stop() -> bool:
+        # Two independent signals, so a lost disconnect notice can't leave the
+        # model writing for nobody: an explicit stop, or the stream going unread.
+        return stop.is_set() or time.monotonic() - pulled_at > _STREAM_ABANDONED_SECONDS
+
+    def write_answer() -> None:
+        try:
+            generation = _generate(
+                request,
+                prepared,
+                on_token=lambda text: events.put({"type": "token", "text": text}),
+                should_stop=should_stop,
+            )
+            events.put({"type": "done", **_finish_query(project_id, request, prepared, generation)})
+        except Exception as exc:  # noqa: BLE001 - the client must always hear how it ended
+            logger.exception("Streamed answer failed")
+            events.put({"type": "error", "detail": str(exc)})
+
+    threading.Thread(target=write_answer, name="safe-insight-answer", daemon=True).start()
+
+    async def event_lines():
+        nonlocal pulled_at
+        last_sent = time.monotonic()
+        try:
+            while True:
+                pulled_at = time.monotonic()
+                try:
+                    event = events.get_nowait()
+                except queue.Empty:
+                    if await http_request.is_disconnected():
+                        return
+                    if time.monotonic() - last_sent >= _STREAM_PING_SECONDS:
+                        yield b'{"type": "ping"}\n'
+                        last_sent = time.monotonic()
+                    await asyncio.sleep(0.05)
+                    continue
+                yield (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+                last_sent = time.monotonic()
+                if event["type"] in ("done", "error"):
+                    return
+        finally:
+            # Finished, or the client left: either way the writer can stop now.
+            stop.set()
+
+    return StreamingResponse(event_lines(), media_type="application/x-ndjson")
 
 
 @app.get("/projects/{project_id}/chunks/{vector_id}", response_model=ChunkOut, tags=["query"])
@@ -496,6 +690,7 @@ def get_chunk(project_id: str, vector_id: int) -> Dict[str, Any]:
     This is what the UI calls when the user clicks a citation card - the moment
     where "the model claims X" becomes "here are the exact words it read".
     """
+    _require_project(project_id)
     store = vector_store.get_store(project_id)
     chunk = store.get_chunk(vector_id)
     if chunk is None:

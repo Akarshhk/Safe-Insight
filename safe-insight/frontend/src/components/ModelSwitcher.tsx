@@ -90,7 +90,7 @@ export default function ModelSwitcher({ onClose, activeModelFile }: ModelSwitche
         }
       };
   
-      source.onerror = (err) => {
+      source.onerror = () => {
         setError("Connection lost. You can try again to resume.");
         setProcessing(false);
         source.close();

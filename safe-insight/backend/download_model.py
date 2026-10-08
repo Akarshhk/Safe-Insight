@@ -9,9 +9,13 @@ guard would block it, which is exactly the behaviour we want everywhere else.
 What it fetches
 ---------------
 1. The generation model: a Q4_K_M GGUF quantisation of Phi-3.5-mini-instruct
-   (~2.2 GB), into ``backend/models/llm/``.
+   (~2.2 GB), into ``<models dir>/llm/``.
 2. The embedding model: ``BAAI/bge-small-en-v1.5`` (~130 MB), into
-   ``backend/models/embeddings/``.
+   ``<models dir>/embeddings/``.
+
+``<models dir>`` is the same one the backend reads: ``models/`` inside the
+per-user data directory (e.g. ``%LOCALAPPDATA%\\safe-insight`` on Windows),
+overridable with SAFE_INSIGHT_DATA_DIR or SAFE_INSIGHT_MODELS_DIR.
 
 Usage
 -----
@@ -37,8 +41,15 @@ from typing import Dict, Optional
 os.environ["HF_HUB_OFFLINE"] = "0"
 os.environ["TRANSFORMERS_OFFLINE"] = "0"
 
-BACKEND_DIR = Path(__file__).resolve().parent
-MODELS_DIR = Path(os.environ.get("SAFE_INSIGHT_MODELS_DIR") or (BACKEND_DIR / "models"))
+import platformdirs  # noqa: E402
+
+# Same defaults as app/config.py, so the backend finds what this script fetches.
+# (Not imported from there: config also sets cache env vars this script manages.)
+DATA_DIR = Path(
+    os.environ.get("SAFE_INSIGHT_DATA_DIR", "").strip()
+    or platformdirs.user_data_dir("safe-insight", False)
+)
+MODELS_DIR = Path(os.environ.get("SAFE_INSIGHT_MODELS_DIR", "").strip() or (DATA_DIR / "models"))
 LLM_DIR = MODELS_DIR / "llm"
 EMBEDDING_DIR = MODELS_DIR / "embeddings"
 

@@ -31,12 +31,12 @@ Three processes, one machine, one permitted network hop.
 │                                     └──────────────┬───────────────┘  │
 │                                                    │                  │
 │                          ┌─────────────────────────▼───────────────┐  │
-│                          │  Local disk — backend/                  │  │
-│                          │   models/llm/*.gguf       (~2 GB)       │  │
+│                          │  Local disk — per-user data directory   │  │
+│                          │   models/llm/*.gguf       (2–9 GB)      │  │
 │                          │   models/embeddings/      (~130 MB)     │  │
-│                          │   data/uploads/           originals     │  │
-│                          │   data/index/*.faiss + metadata.json    │  │
-│                          │   data/logs/audit.sqlite3               │  │
+│                          │   uploads/                originals     │  │
+│                          │   projects/<id>/ *.faiss + metadata.json│  │
+│                          │   logs/audit.sqlite3, app_state.sqlite3 │  │
 │                          └─────────────────────────────────────────┘  │
 └───────────────────────────────────────────────────────────────────────┘
                                     ╳
@@ -61,10 +61,10 @@ loopback port, which is the one thing the kill-switch explicitly permits.
 
 ```mermaid
 flowchart TD
-    A["User adds file<br/>(PDF / DOCX / TXT / MD)"] --> B["POST /documents<br/>streamed to a temp file"]
+    A["User adds file<br/>(PDF / DOCX / TXT / MD / image)"] --> B["POST /projects/{id}/documents<br/>streamed to a temp file"]
     B --> C{"SHA-256 already<br/>in the index?"}
     C -- yes --> C1["Return existing doc_id<br/>nothing re-indexed"]
-    C -- no --> D["store_upload()<br/>copy to data/uploads/&lt;doc_id&gt;.ext"]
+    C -- no --> D["store_upload()<br/>copy to uploads/&lt;doc_id&gt;.ext"]
     D --> E{"file type"}
     E -- pdf --> F1["PyMuPDF<br/>one TextSegment per page"]
     E -- docx --> F2["python-docx<br/>paragraphs + table cells"]
@@ -107,14 +107,14 @@ sequenceDiagram
     participant A as audit_log (SQLite)
 
     U->>R: types a question
-    R->>F: POST /query {question, top_k}
+    R->>F: POST /projects/{id}/query {question, top_k, strict_mode}
     F->>E: embed_query(question)
     E-->>F: 384-d unit vector
     F->>V: search(vector, top_k, min_similarity)
     V-->>F: SearchResult[] (chunk + cosine score)
 
-    alt no chunk clears the similarity floor
-        F-->>F: answer = standard refusal string
+    alt best chunk below the grounding cutoff (0.50)
+        F-->>F: strict mode: standard refusal string<br/>otherwise: general answer, no citations
     else chunks retrieved
         F->>L: generate(question, results)
         Note over L: prompt = system rules +<br/>numbered passages [1..k] +<br/>question. Nothing else.
@@ -130,7 +130,7 @@ sequenceDiagram
     R-->>U: answer + citation cards
 
     U->>R: clicks citation [2]
-    R->>F: GET /chunks/{vector_id}
+    R->>F: GET /projects/{id}/chunks/{vector_id}
     F-->>R: untruncated source text
     R-->>U: exact paragraph the model read
 ```
@@ -141,9 +141,13 @@ the model resolves deterministically to citation 2, whose `vector_id` fetches th
 exact stored text. This is a single invariant, and it is the whole differentiator:
 break it and "cited" becomes decorative.
 
-**Retrieved vs referenced.** All `top_k` chunks are shown, but those the model
-actually cited are flagged and highlighted. The audit log stores both sets — an
-auditor needs to see what the model *could* have used, not only what it did.
+**Retrieved vs given vs referenced.** Of the `top_k` chunks retrieved, only
+those scoring within `RELEVANCE_MARGIN` (0.10) of the best are given to the
+model — on a CPU each passage costs seconds of prompt reading. Every passage the
+model was given is shown, and those it actually cited are flagged and
+highlighted. The audit log stores the ids of everything retrieved as well as the
+citations — an auditor needs to see what the model *could* have used, not only
+what it did.
 
 ---
 
@@ -160,6 +164,9 @@ auditor needs to see what the model *could* have used, not only what it did.
 | `llm.py` | GGUF loading, grounded prompt, generation | retrieval or citation shaping |
 | `citations.py` | results → verifiable citation trail | retrieval or generation |
 | `audit_log.py` | SQLite log, hash chain, export | anything on the request path |
+| `projects_db.py` | projects, their document lists, chat history | vectors or files |
+| `references.py` | which document a question names or points at ("this doc") | search or scoring |
+| `setup.py` | model catalog, sanctioned download, model switch | the RAG pipeline |
 | `schemas.py` | wire formats | business logic |
 | `main.py` | HTTP routes, orchestration, lifespan | algorithms |
 
@@ -184,8 +191,9 @@ Layer 2  Socket monkey-patch         socket.connect / connect_ex /
 Layer 1  Environment                 HF_HUB_OFFLINE=1, TRANSFORMERS_OFFLINE=1
          ────────────────────────    local_files_only=True on every model load
               ▲
-Layer 0  Architecture                no HTTP client in requirements.txt's
-         ────────────────────────    runtime path; loopback bind; CORS allowlist
+Layer 0  Architecture                HTTP client used only for the user-started
+         ────────────────────────    model download (sanctioned, logged);
+                                     loopback bind; CORS allowlist
 ```
 
 Order of installation matters and is enforced in `main.py`: `config` is imported
@@ -211,16 +219,22 @@ red and lists the destination.
 ## 6. Storage design
 
 ```
-backend/data/
+<per-user data dir>/            %LOCALAPPDATA%\safe-insight on Windows
+├── models/                     llm/*.gguf + embeddings/ (HF cache layout)
 ├── uploads/
 │   └── <doc_id>.pdf            original files, named by UUID (not by user
 │                               input, so a hostile filename cannot traverse)
-├── index/
-│   ├── safe_insight.faiss      IndexIDMap2(IndexFlatIP(384))
-│   └── metadata.json           {version, dimension, embedding_model,
+├── projects/
+│   └── <project_id>/           a UUID from app_state.sqlite3; unknown ids
+│       │                       are refused before any path is built
+│       ├── index.faiss         IndexIDMap2(IndexFlatIP(384))
+│       └── metadata.json       {version, dimension, embedding_model,
 │                                next_vector_id, documents{}, chunks{}}
+├── app_state.sqlite3           projects, their documents, chat history
+├── settings.json               the model chosen in the app
 └── logs/
     └── audit.sqlite3           query_log (hash-chained) + document_log
+                                + system_log (sanctioned downloads)
 ```
 
 **Three stores, three access patterns.** FAISS handles similarity search and
@@ -244,7 +258,11 @@ record_hash(0) = SHA256( "000...0" ‖ canonical_json(record 1) )
 ```
 
 `canonical_json` sorts keys, so the hash is stable across Python versions and
-dict ordering. `GET /audit/verify` re-computes the chain from row 1 and reports
+dict ordering. The record is every stored field (question, answer, retrieved
+ids, citations, model, token counts, project, ...). Each row's `hash_version`
+says which field set it was hashed with: rows written by older builds hashed
+fewer fields and are verified against exactly that set, so upgrading never
+invalidates an existing log. `GET /audit/verify` re-computes the chain from row 1 and reports
 the first mismatch by id. Tested in `tests/test_smoke.py::test_audit_chain_detects_tampering`,
 which edits a row with raw SQL and asserts the break is located.
 
@@ -265,9 +283,23 @@ Measured expectations on the target machine (8 GB RAM, 4-core CPU, no GPU):
 
 **Consequences designed around.** Generation dominates everything else, which is
 why `warm_up()` runs at startup (so the *first* question is not also the slowest),
-why `temperature` is 0.2 and `max_tokens` 512 (no rambling on a CPU budget), and
-why streaming is the top item on the "next steps" list — it changes perceived
-latency far more than any retrieval optimisation would.
+why `temperature` is 0.2 and normal-mode answers are asked to be short (no
+rambling on a CPU budget; `max_tokens` is a generous 2048 because the user can
+press Stop), and
+why answers stream (`POST /projects/{id}/query/stream`) — the first words appear
+in ~2 s even when the whole answer takes 30 s, which changes perceived latency
+far more than any retrieval optimisation would.
+
+**Streaming that cannot get stuck.** The answer is written on its own thread and
+handed to the HTTP stream through a queue. Three things keep it from hanging:
+the stream sends a `ping` every 3 s while it has nothing else to say, so the UI
+treats 20 s of silence as a dead backend rather than waiting forever; closing
+the connection (the Stop button, switching project, closing the window) stops
+generation at the next token, so the next question never waits behind an
+answer nobody is reading — with a second, independent trigger if the stream
+simply goes unread for 10 s; and answers that end early are marked
+(`[Stopped before the answer was finished.]`, `[Answer cut off at the length
+limit.]`) in the UI, the chat history and the audit log alike.
 
 **Where the scale ceiling is.** `IndexFlatIP` is O(n) per query. At ~1M vectors
 (roughly 20,000 documents) a flat scan starts to be noticeable and an IVF index
@@ -294,16 +326,22 @@ model) but does not prevent it.
 
 ## 9. Testing strategy
 
-`backend/tests/test_smoke.py` — 18 tests, ~0.2 s, no models required:
+`backend/tests/test_smoke.py` — 32 tests, ~1 s, no models required:
 
 - **chunking** — size bounds, sequential gap-free indices, page inheritance,
   punctuation-free text, empty input, whitespace normalisation
 - **citations** — marker extraction (`[1]`, `[1, 3]`, `[2][4]`, repeats),
   location formatting with and without page numbers, word-boundary truncation
 - **audit log** — round-trip, newest-first ordering, chain validity, tamper
-  detection with an explicit `UPDATE`, JSONL export
+  detection with an explicit `UPDATE` (answer and citations), JSONL export, a
+  log written by older builds still verifying after migration
+- **projects** — unknown project ids get a 404 before touching the filesystem
+  (via `TestClient`), re-registering a duplicate upload is a no-op
+- **document references** — questions naming a file (fully or by two of its
+  words) or pointing at "this doc" resolve to the right document; general
+  questions resolve to none
 - **network guard** — outbound connect blocked, loopback still allowed, remote
-  DNS blocked, status payload correct
+  DNS blocked (as a `socket.gaierror`), status payload correct
 
 Deliberately excluded: anything requiring FAISS, PyTorch or a 2 GB GGUF. Those
 turn a one-second check into a multi-gigabyte prerequisite. The natural next

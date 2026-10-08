@@ -31,7 +31,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
 
 from app import config
 
@@ -42,6 +42,10 @@ logger = logging.getLogger(__name__)
 
 _llm = None                     # type: ignore[var-annotated]
 _lock = threading.Lock()
+#: llama.cpp contexts are not thread-safe and FastAPI runs ``/query`` on a
+#: thread pool, so generations - and model swaps - take turns on this lock.
+#: Lock order is always _generate_lock, then _lock.
+_generate_lock = threading.Lock()
 _load_error: Optional[str] = None
 
 SYSTEM_PROMPT = (
@@ -62,7 +66,10 @@ GENERAL_SYSTEM_PROMPT = (
     "and cite the passage number in square brackets (e.g. [2]) after every claim. "
     "If the provided passages do not contain the answer, or if no passages are provided, "
     "use your general knowledge to answer conversationally. "
-    "DO NOT cite any passage numbers if you are relying on general knowledge."
+    "DO NOT cite any passage numbers if you are relying on general knowledge. "
+    # Every generated token costs ~0.1 s on a laptop CPU, so length is latency.
+    "Keep answers short and direct - a few sentences - unless the user asks "
+    "for more detail."
 )
 
 #: The exact refusal string rule 3 asks for. The API surfaces this as
@@ -70,6 +77,10 @@ GENERAL_SYSTEM_PROMPT = (
 INSUFFICIENT_CONTEXT_ANSWER = (
     "The provided documents do not contain enough information to answer that."
 )
+
+#: Appended when an answer ends early, so it never looks frozen mid-sentence.
+ANSWER_CUT_OFF_NOTE = "\n\n[Answer cut off at the length limit.]"
+ANSWER_STOPPED_NOTE = "\n\n[Stopped before the answer was finished.]"
 
 
 @dataclass
@@ -139,18 +150,25 @@ def get_llm():
     return _llm
 
 
+def use_model_file(filename: str) -> None:
+    """Point config at a GGUF in the models dir; the next load picks it up."""
+    config.LLM_MODEL_FILENAME = filename
+    config.LLM_MODEL_PATH = config.MODELS_DIR / "llm" / filename
+    config.LLM_CONTEXT_TOKENS = config._get_llm_context_tokens()
+
+
 def reload_llm(filename: str) -> None:
     """Hot-swap the active model without restarting the backend."""
     global _llm, _load_error
-    with _lock:
+    # Waiting for any in-flight answer also means the old model is freed before
+    # the new one loads, rather than both sitting in RAM at once.
+    with _generate_lock, _lock:
         if _llm is not None:
             # Drop the current reference; garbage collection frees the C structs.
             _llm = None
-            
-        config.LLM_MODEL_FILENAME = filename
-        config.LLM_MODEL_PATH = config.MODELS_DIR / "llm" / filename
-        config.LLM_CONTEXT_TOKENS = config._get_llm_context_tokens()
-        
+
+        use_model_file(filename)
+
         try:
             _llm = _load_llm()
             _load_error = None
@@ -268,6 +286,14 @@ def _stub_answer(question: str, results: Sequence[SearchResult]) -> GenerationRe
     )
 
 
+def _count_tokens(llm: Any, *texts: str) -> int:
+    """Token count by the loaded model's own tokenizer; 0 if it cannot tokenize."""
+    try:
+        return sum(len(llm.tokenize(text.encode("utf-8"), add_bos=False)) for text in texts if text)
+    except Exception:  # noqa: BLE001 - bookkeeping must never fail a query
+        return 0
+
+
 # --------------------------------------------------------------------------- #
 # Generation
 # --------------------------------------------------------------------------- #
@@ -278,6 +304,28 @@ def generate(
     temperature: Optional[float] = None,
     strict_mode: bool = False,
     history: Optional[List[Dict[str, str]]] = None,
+    documents: Optional[Sequence[str]] = None,
+    on_token: Optional[Callable[[str], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> GenerationResult:
+    """Thread-safe entry point; see :func:`_generate_unlocked` for the details."""
+    with _generate_lock:
+        return _generate_unlocked(
+            question, results, max_tokens, temperature, strict_mode, history, documents,
+            on_token, should_stop,
+        )
+
+
+def _generate_unlocked(
+    question: str,
+    results: Sequence[SearchResult],
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    strict_mode: bool = False,
+    history: Optional[List[Dict[str, str]]] = None,
+    documents: Optional[Sequence[str]] = None,
+    on_token: Optional[Callable[[str], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> GenerationResult:
     """
     Generate a grounded answer from the retrieved chunks.
@@ -290,6 +338,12 @@ def generate(
         temperature: defaults to ``config.LLM_TEMPERATURE`` (0.2 - low, because
             the job is faithful extraction, not creative writing).
         strict_mode: If False, falls back to general knowledge if context is absent.
+        documents: filenames in the project, named in the system prompt so the
+            model never claims nothing was uploaded.
+        on_token: called with each piece of answer text as it is generated
+            (streaming). The returned ``answer`` is still the complete text.
+        should_stop: polled between pieces; returning True ends generation
+            early and the answer is marked as stopped.
 
     Returns:
         A :class:`GenerationResult`. Never raises for a missing model; it falls
@@ -309,10 +363,23 @@ def generate(
     except LLMUnavailable:
         return _stub_answer(question, results)
 
+    if should_stop is not None and should_stop():
+        # Cancelled while waiting for the previous answer to finish.
+        return GenerationResult(
+            answer=ANSWER_STOPPED_NOTE.strip(),
+            model=config.LLM_MODEL_PATH.name,
+            prompt_tokens=0,
+            completion_tokens=0,
+            finish_reason="stopped",
+        )
+
     t_assembly_start = time.perf_counter()
     prompt = build_prompt(question, results)
     sys_prompt = SYSTEM_PROMPT if strict_mode else GENERAL_SYSTEM_PROMPT
-    
+    if documents:
+        # In the system prompt (not the question) so it stays a cached prefix.
+        sys_prompt += "\n\nDocuments in this project: " + ", ".join(documents[:30]) + "."
+
     # Fast token estimation
     def approx_tokens(text: str) -> int:
         return len(text) // 4
@@ -322,9 +389,10 @@ def generate(
     max_out = max_tokens or config.LLM_MAX_OUTPUT_TOKENS
     
     # Reserve tokens for current prompt, system prompt, and output.
-    # We also hard-cap history to ~1000 tokens to keep CPU inference fast.
+    # History is re-read on every question, so it is hard-capped at ~500 tokens:
+    # reading 1000 tokens alone took 10-20 s on a laptop CPU.
     available_history_tokens = min(
-        1000, 
+        500,
         config.LLM_CONTEXT_TOKENS - sys_tokens - prompt_tokens_est - max_out - 200
     )
     
@@ -346,6 +414,10 @@ def generate(
     t_assembly = time.perf_counter() - t_assembly_start
     
     t_prefill_start = time.perf_counter()
+    t_prefill: Optional[float] = None
+    content = ""
+    finish_reason = None
+    usage: Dict[str, Any] = {}
     try:
         response_stream = llm.create_chat_completion(
             messages=messages,
@@ -356,43 +428,54 @@ def generate(
             stop=["\nContext passages:", "\nQuestion:"],
             stream=True,
         )
-        
         try:
-            first_chunk = next(response_stream)
-        except StopIteration:
-            first_chunk = None
-        
-        t_prefill = time.perf_counter() - t_prefill_start
-        
-        content = ""
-        finish_reason = None
-        usage = {}
-        if first_chunk:
-            if "choices" in first_chunk and len(first_chunk["choices"]) > 0:
-                content += first_chunk["choices"][0]["delta"].get("content", "")
-            
             for chunk in response_stream:
-                if "choices" in chunk and len(chunk["choices"]) > 0:
-                    content += chunk["choices"][0]["delta"].get("content", "")
-                    if chunk["choices"][0].get("finish_reason"):
-                        finish_reason = chunk["choices"][0]["finish_reason"]
-                if "usage" in chunk and chunk["usage"]:
+                if t_prefill is None:
+                    # The first chunk arrives once the whole prompt has been read.
+                    t_prefill = time.perf_counter() - t_prefill_start
+                if should_stop is not None and should_stop():
+                    finish_reason = "stopped"
+                    break
+                if chunk.get("choices"):
+                    choice = chunk["choices"][0]
+                    piece = choice["delta"].get("content", "")
+                    if piece:
+                        content += piece
+                        if on_token is not None:
+                            on_token(piece)
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                if chunk.get("usage"):
                     usage = chunk["usage"]
-        
-        t_generation = time.perf_counter() - t_prefill_start - t_prefill
-        
+        finally:
+            # Ends llama.cpp's loop now rather than at garbage collection, so a
+            # stopped answer frees the model for the next question immediately.
+            response_stream.close()
+
     except Exception as exc:  # noqa: BLE001 - native errors surface as RuntimeError
         logger.exception("Generation failed")
         return GenerationResult(
-            answer=f"Generation failed locally: {exc}",
+            # Keep whatever the user already saw streamed, and say why it ended.
+            answer=(
+                f"{content.strip()}\n\n[Generation failed: {exc}]"
+                if content.strip()
+                else f"Generation failed locally: {exc}"
+            ),
             model=config.LLM_MODEL_PATH.name,
             prompt_tokens=0,
             completion_tokens=0,
             finish_reason="error",
         )
+    if t_prefill is None:
+        t_prefill = time.perf_counter() - t_prefill_start
+    t_generation = time.perf_counter() - t_prefill_start - t_prefill
 
-    prompt_tokens = int(usage.get("prompt_tokens", 0))
-    completion_tokens = int(usage.get("completion_tokens", 0))
+    # llama.cpp's chat stream never reports usage, so count with the model's own
+    # tokenizer. The prompt figure leaves out the chat template's few tokens.
+    prompt_tokens = int(usage.get("prompt_tokens", 0)) or _count_tokens(
+        llm, *(message["content"] for message in messages)
+    )
+    completion_tokens = int(usage.get("completion_tokens", 0)) or _count_tokens(llm, content)
     
     # Warn if we are approaching the context window limit
     if prompt_tokens > config.LLM_CONTEXT_TOKENS * 0.85:
@@ -400,8 +483,15 @@ def generate(
             f"Prompt size ({prompt_tokens} tokens) is approaching the context limit "
             f"({config.LLM_CONTEXT_TOKENS} tokens). Consider reducing history or top_k."
         )
+
+    # Say why an answer ended early, so it never looks like it froze mid-sentence.
+    answer = content.strip()
+    if finish_reason == "length":
+        answer += ANSWER_CUT_OFF_NOTE
+    elif finish_reason == "stopped":
+        answer = (answer + ANSWER_STOPPED_NOTE).strip()
     return GenerationResult(
-        answer=content.strip(),
+        answer=answer,
         model=config.LLM_MODEL_PATH.name,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -418,6 +508,7 @@ __all__ = [
     "SYSTEM_PROMPT",
     "INSUFFICIENT_CONTEXT_ANSWER",
     "get_llm",
+    "use_model_file",
     "reload_llm",
     "is_loaded",
     "status",

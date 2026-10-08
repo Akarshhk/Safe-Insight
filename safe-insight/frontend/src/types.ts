@@ -18,11 +18,6 @@ export interface DocumentInfo {
   ingested_at: string;
 }
 
-export interface DocumentListResponse {
-  documents: DocumentInfo[];
-  total_chunks: number;
-}
-
 export interface IngestResponse {
   doc_id: string;
   filename: string;
@@ -109,14 +104,9 @@ export interface HealthResponse {
   status: string;
   version: string;
   offline: OfflineStatus;
+  /** Shared by every project; per-project counts come from GET /projects/{id}. */
   index: {
-    documents: number;
-    chunks: number;
-    vectors: number;
-    dimension: number | null;
     embedding_model: string | null;
-    index_path: string;
-    loaded: boolean;
   };
   llm: {
     loaded: boolean;
@@ -150,4 +140,6 @@ export interface ChatMessage {
     grounded: boolean;
   };
   isError?: boolean;
+  /** True while the answer is still being written (streaming). */
+  streaming?: boolean;
 }

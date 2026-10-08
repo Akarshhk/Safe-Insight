@@ -464,6 +464,17 @@ code {
   margin: 0;
   white-space: pre-wrap;
 }
+/* Blinking cursor while the answer is still being written. */
+.answer--streaming::after {
+  content: "▍";
+  margin-left: 1px;
+  animation: answer-cursor 1s steps(2, start) infinite;
+}
+@keyframes answer-cursor {
+  to {
+    visibility: hidden;
+  }
+}
 .answer-meta {
   margin: 8px 0 0;
 }

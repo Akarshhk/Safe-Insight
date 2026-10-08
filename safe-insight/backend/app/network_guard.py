@@ -64,6 +64,11 @@ _violations_lock = threading.Lock()
 _installed = False
 _self_check: Dict[str, Any] = {"ran": False, "outbound_blocked": None, "detail": "not run"}
 
+#: True only in the thread running the self-check's own probe, so that
+#: deliberate attempt is not logged as an escape (which would keep the badge
+#: red forever). Attempts from anywhere else are still recorded.
+_in_self_check: contextvars.ContextVar[bool] = contextvars.ContextVar("in_self_check", default=False)
+
 _sanctioned_domains: contextvars.ContextVar[Set[str]] = contextvars.ContextVar("sanctioned_domains", default=set())
 _sanctioned_download_active = False
 _global_sanctioned_domains: Set[str] = set()
@@ -77,6 +82,15 @@ _orig_getaddrinfo = socket.getaddrinfo
 
 class OutboundNetworkBlocked(RuntimeError):
     """Raised when code attempts a non-loopback connection in strict mode."""
+
+
+class OutboundDNSBlocked(OutboundNetworkBlocked, socket.gaierror):
+    """
+    Raised when code tries to resolve a remote hostname in strict mode.
+
+    Also a ``socket.gaierror``, so HTTP libraries treat it as an ordinary
+    resolution failure and degrade the way they already know how to.
+    """
 
 
 # --------------------------------------------------------------------------- #
@@ -160,7 +174,8 @@ def _check_destination(address: Any, action: str) -> None:
             )
         return
 
-    _record_violation(host, port, action)
+    if not _in_self_check.get():
+        _record_violation(host, port, action)
     if config.STRICT_NETWORK_GUARD:
         raise OutboundNetworkBlocked(
             f"Safe Insight network guard blocked an outbound connection to "
@@ -202,8 +217,9 @@ def _guarded_getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any
     if not _is_local_address(host):
         _record_violation(host, port, "socket.getaddrinfo")
         if config.STRICT_NETWORK_GUARD:
-            raise OutboundNetworkBlocked(
-                f"Safe Insight network guard blocked DNS resolution of {host!r}."
+            raise OutboundDNSBlocked(
+                socket.EAI_NONAME,
+                f"Safe Insight network guard blocked DNS resolution of {host!r}.",
             )
             
     result = _orig_getaddrinfo(host, port, *args, **kwargs)
@@ -258,6 +274,7 @@ def run_self_check(timeout: float = 1.5) -> Dict[str, Any]:
     probe.settimeout(timeout)
     blocked = False
     detail = ""
+    token = _in_self_check.set(True)
     try:
         # Deliberately go through the *patched* API - that is what we are testing.
         probe.connect(("8.8.8.8", 53))
@@ -274,6 +291,7 @@ def run_self_check(timeout: float = 1.5) -> Dict[str, Any]:
         blocked = True
         detail = f"Outbound probe failed at the OS level ({exc.__class__.__name__}: {exc})."
     finally:
+        _in_self_check.reset(token)
         probe.close()
 
     _self_check = {
@@ -372,6 +390,7 @@ def sanctioned_download(reason: str, allowed_domains: Set[str]):
 
 __all__ = [
     "OutboundNetworkBlocked",
+    "OutboundDNSBlocked",
     "install_guard",
     "run_self_check",
     "get_status",

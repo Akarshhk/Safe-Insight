@@ -114,14 +114,21 @@ def get_project(project_id: str) -> Optional[Dict[str, Any]]:
         ]
     }
 
+def project_exists(project_id: str) -> bool:
+    with _connect() as conn:
+        row = conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone()
+    return row is not None
+
 def delete_project(project_id: str) -> None:
     with _write_lock, _connect() as conn:
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
 def add_document(project_id: str, doc_id: str, filename: str) -> None:
+    # OR IGNORE: re-uploading a file the project already has hands back the
+    # existing doc_id, which is already registered here.
     with _write_lock, _connect() as conn:
         conn.execute(
-            "INSERT INTO documents (id, project_id, filename, added_at) VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO documents (id, project_id, filename, added_at) VALUES (?, ?, ?, ?)",
             (doc_id, project_id, filename, _utc_now())
         )
 

@@ -3,7 +3,7 @@
  *
  * Each citation is a collapsed card showing the source, its location and the
  * retrieval score. Expanding one fetches the *untruncated* chunk from
- * `GET /chunks/{vector_id}` - the excerpt in the answer payload is display-sized,
+ * `GET /projects/{id}/chunks/{vector_id}` - the excerpt in the answer payload is display-sized,
  * and the point of this feature is that the user can always get to the exact
  * text the model read, not a summary of it.
  *
@@ -17,10 +17,12 @@ import { getChunk } from "../api";
 import type { Citation, ChunkDetail } from "../types";
 
 interface Props {
+  /** Vector ids are only unique within a project. */
+  projectId: string;
   citations: Citation[];
 }
 
-export default function CitationList({ citations }: Props) {
+export default function CitationList({ projectId, citations }: Props) {
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   const [details, setDetails] = useState<Record<number, ChunkDetail>>({});
   const [loadingId, setLoadingId] = useState<number | null>(null);
@@ -40,7 +42,7 @@ export default function CitationList({ citations }: Props) {
     if (details[citation.vector_id]) return;
     setLoadingId(citation.vector_id);
     try {
-      const detail = await getChunk(citation.vector_id);
+      const detail = await getChunk(projectId, citation.vector_id);
       setDetails((current) => ({ ...current, [citation.vector_id]: detail }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

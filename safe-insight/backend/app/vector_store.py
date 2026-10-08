@@ -427,6 +427,31 @@ class VectorStore:
                 result.rank = rank
             return results
 
+    def search_documents(self, query_vector: np.ndarray, doc_ids: List[str]) -> List[SearchResult]:
+        """
+        Every chunk of the given documents, scored against the query, best first.
+
+        Used when the question names a document (or points at "this doc"), so
+        no other document can crowd it out. No similarity floor: the caller
+        decides what a vague question gets.
+        """
+        wanted = set(doc_ids)
+        with self._lock:
+            if self._index is None or self._index.ntotal == 0:
+                return []
+            # Exact search over everything; a flat index scores every vector anyway.
+            scores, ids = self._index.search(
+                np.ascontiguousarray(query_vector, dtype=np.float32), self._index.ntotal
+            )
+            results = [
+                SearchResult(chunk=chunk, score=float(score))
+                for score, vector_id in zip(scores[0], ids[0])
+                if (chunk := self._chunks.get(int(vector_id))) is not None and chunk.doc_id in wanted
+            ]
+        for rank, result in enumerate(results, start=1):
+            result.rank = rank
+        return results
+
     def get_chunk(self, vector_id: int) -> Optional[ChunkRecord]:
         """Look up one chunk by vector id - backs the 'show me the source' click."""
         with self._lock:
@@ -487,17 +512,36 @@ def get_store(project_id: str) -> VectorStore:
             _stores[project_id] = store
         return _stores[project_id]
 
-def delete_store(project_id: str) -> None:
-    """Drop the store from memory and disk."""
+def delete_store(project_id: str) -> List[DocumentRecord]:
+    """
+    Drop the store from memory and disk, including its stored original files.
+
+    Returns the documents it held, so the caller can audit their removal.
+    """
+    # Load it if it is not cached yet: the metadata is what lists the originals.
+    # A corrupt store must still be deletable, so that failure is not fatal.
+    try:
+        records = get_store(project_id).list_documents()
+    except VectorStoreError as exc:
+        logger.warning("Deleting project %s without its file list: %s", project_id, exc)
+        records = []
+
     with _stores_lock:
-        store = _stores.pop(project_id, None)
-        if store:
-            store.clear()
-        
+        _stores.pop(project_id, None)
+
+        # Originals live in the shared uploads dir, not the project dir, so the
+        # rmtree below would otherwise leave them behind.
+        for record in records:
+            try:
+                Path(record.stored_path).unlink(missing_ok=True)
+            except OSError as exc:  # pragma: no cover - filesystem edge case
+                logger.warning("Could not delete %s: %s", record.stored_path, exc)
+
         project_dir = config.PROJECTS_DIR / project_id
         if project_dir.exists():
             import shutil
             shutil.rmtree(project_dir, ignore_errors=True)
+    return records
 
 __all__ = [
     "VectorStore",

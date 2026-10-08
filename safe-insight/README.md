@@ -34,10 +34,12 @@ documents legally cannot be sent to a third-party service.
 | Feature | Status |
 |---|---|
 | Ingest PDF, DOCX, TXT, MD | ✅ PyMuPDF / python-docx, per-page metadata for PDFs |
+| Ingest PNG / JPG (pasted screenshots) | ✅ Tesseract OCR, if installed on the machine |
+| Projects | ✅ separate index, documents and chat history per project |
 | Chunk with overlap, keep provenance | ✅ ~500 tokens, ~50 overlap, sentence-aware |
 | Local embeddings | ✅ `BAAI/bge-small-en-v1.5` via sentence-transformers |
 | Persistent vector index | ✅ FAISS on disk, incremental add + per-document delete |
-| Local generation | ✅ llama-cpp-python, Phi-3.5-mini Q4_K_M GGUF (swappable) |
+| Local generation | ✅ llama-cpp-python; Phi-3.5-mini or Llama 3.1 8B GGUF, switchable in the app |
 | Citation trail | ✅ structured citations, clickable to the exact source text |
 | Audit log | ✅ SQLite, hash-chained, never transmitted |
 | Network kill-switch | ✅ socket-level guard + startup self-check + `/health/offline-check` |
@@ -49,7 +51,8 @@ documents legally cannot be sent to a third-party service.
 
 **Prerequisites**
 
-- Python **3.10–3.12** (3.13 wheels for `faiss-cpu` / `llama-cpp-python` are still patchy)
+- Python **3.10 or newer** (developed on 3.14). If `faiss-cpu` or
+  `llama-cpp-python` has no wheel for your version, use one that does.
 - Node.js 18+
 - Rust toolchain (`rustup`) — Tauri needs it
 - Windows: **Microsoft Visual C++ Build Tools** and **WebView2** (WebView2 ships with Windows 11)
@@ -87,7 +90,13 @@ python download_model.py
 ```
 
 This fetches ~2.3 GB: the Phi-3.5-mini GGUF and the BGE embedding model, into
-`backend/models/`. Useful variants:
+the app's per-user data directory (`%LOCALAPPDATA%\safe-insight\models` on
+Windows, `~/Library/Application Support/safe-insight/models` on macOS,
+`~/.local/share/safe-insight/models` on Linux).
+
+Alternatively, skip this step: on first launch the app opens a setup wizard
+that downloads a model from its catalog (Phi-3.5-mini, Llama 3.1 8B Q4 or Q8)
+and checks its SHA-256. Useful variants of the script:
 
 ```bash
 python download_model.py --check
@@ -140,8 +149,9 @@ cd safe-insight/backend
 pytest -q
 ```
 
-18 tests covering chunking, citation extraction, the audit hash chain and the
-network kill-switch. They need no models and finish in under a second.
+32 tests covering chunking, citation extraction, the audit hash chain
+(including logs written by older builds), projects and the network
+kill-switch. They need no models and finish in about a second.
 
 ---
 
@@ -157,7 +167,9 @@ This is the demo for the viva. It takes about a minute.
    - strict mode — yes (connections raise)
    - outbound probe — blocked
    - escape attempts — 0
-   - HTTP client modules loaded — none
+   - HTTP client modules loaded — `httpx` (imported by `huggingface_hub` and
+     the setup downloader; loaded is not the same as connected — the socket
+     guard blocks it like everything else)
 4. Ask a question. The full pipeline — embedding, retrieval, generation,
    citations, audit logging — runs exactly as before.
 5. Click a citation to reveal the exact source paragraph.
@@ -179,7 +191,10 @@ ML library is imported. Every non-loopback destination raises. At startup the
 process deliberately *tries* to reach `8.8.8.8:53` and reports whether the
 attempt was refused — so the badge reflects a tested behaviour, not a claim in a
 comment. The only permitted socket traffic is loopback, which is how the Tauri
-window talks to FastAPI.
+window talks to FastAPI. The one exception is a model download the user starts
+from the setup wizard: for its duration, `huggingface.co` is allowed, the badge
+shows "downloading" instead of "verified", and the start and end are written to
+the audit database's `system_log` table.
 
 ---
 
@@ -216,12 +231,19 @@ it.
 
 **4. Answering a question.** Your question goes through the same embedding
 model, producing a comparable list of numbers. FAISS returns the five most
-similar passages (configurable). Those passages — and nothing else — are pasted
-into a prompt for the local language model, along with an instruction that
-amounts to: *answer only from these passages, cite them by number, and if they do
-not contain the answer, say so.* The model, a 3.8-billion-parameter Phi-3.5-mini
-compressed to about 2 GB so it runs on an ordinary laptop CPU, then writes the
-answer.
+similar passages (configurable). If the best of them is a close enough match,
+it and any others nearly as close are pasted into a prompt for the local
+language model, along with an instruction to cite them by number. Questions
+that name a file ("what's in resume.pdf?") or point at one ("what is this doc
+about?", "the attached file") skip that matching: such questions have no
+content to match, so the app searches only that document — the newest upload
+for "this doc" — and for a vague question gives the model its opening pages.
+The model is also told which files the project contains. In *strict document mode* the
+instruction is *answer only from these passages, and if they do not contain the
+answer, say so*; otherwise a question the documents do not cover gets a
+general-knowledge answer, clearly labelled as not coming from your documents.
+The model — by default a 3.8-billion-parameter Phi-3.5-mini compressed to about
+2 GB so it runs on an ordinary laptop CPU — then writes the answer.
 
 **5. Proving where the answer came from.** Because the passages were numbered
 before being handed to the model, and the model was told to cite those numbers,
@@ -251,13 +273,17 @@ safe-insight/
 ├── .gitignore
 ├── backend/
 │   ├── requirements.txt
-│   ├── download_model.py       ← the ONLY networked script; run once
+│   ├── download_model.py       ← optional one-time model download (CLI)
 │   ├── tests/
-│   │   └── test_smoke.py       ← 18 model-free tests
+│   │   └── test_smoke.py       ← 32 model-free tests
 │   └── app/
 │       ├── __init__.py         ← module map; read this first
 │       ├── config.py           ← every tunable; sets offline env vars on import
 │       ├── network_guard.py    ← socket kill-switch + self-check
+│       ├── setup.py            ← model catalog, sanctioned download, model switch
+│       ├── models_catalog.json ← the models the setup wizard offers
+│       ├── projects_db.py      ← projects, their documents and chat history
+│       ├── references.py       ← "this doc" / named-file questions → which document
 │       ├── ingestion.py        ← file -> text segments -> chunks
 │       ├── chunking.py         ← the chunking algorithm
 │       ├── embeddings.py       ← local sentence-transformers encoder
@@ -286,10 +312,18 @@ safe-insight/
         ├── styles.css
         └── components/
             ├── OfflineBadge.tsx
+            ├── ProjectSidebar.tsx
             ├── DocumentPanel.tsx
             ├── ChatPanel.tsx
-            └── CitationList.tsx
+            ├── CitationList.tsx
+            ├── SetupWizard.tsx   ← first-run model download
+            └── ModelSwitcher.tsx ← change model from the footer
 ```
+
+Runtime data does not live in the repository. Everything the app writes —
+models, uploaded originals, per-project indexes, the audit log — goes under one
+per-user data directory (`%LOCALAPPDATA%\safe-insight` on Windows; see
+`SAFE_INSIGHT_DATA_DIR` below), so wiping local state means deleting one folder.
 
 Two files exist that the original brief did not list, both for readability:
 `app/schemas.py` (keeps wire formats out of `main.py`) and `app/config.py`
@@ -300,26 +334,33 @@ Two files exist that the original brief did not list, both for readability:
 ## API reference
 
 All endpoints are on `http://127.0.0.1:8765`. Full interactive docs at `/docs`.
+Every path under `/projects/{id}` returns 404 for an unknown project id.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | index counts, model state, audit stats, offline status |
+| `GET` | `/health` | model state, embedding model, audit stats, offline status |
 | `GET` | `/health/offline-check` | offline badge data; `?rerun=true` forces a live probe |
-| `POST` | `/documents` | upload + ingest + index one file (multipart) |
-| `GET` | `/documents` | list indexed documents |
-| `DELETE` | `/documents/{doc_id}` | remove a document and its vectors |
-| `GET` | `/documents/{doc_id}/chunks` | every chunk of one document (debugging) |
-| `POST` | `/query` | ask a question → answer + citations |
-| `GET` | `/chunks/{vector_id}` | untruncated source text behind a citation |
+| `POST` / `GET` | `/projects` | create a project / list projects |
+| `GET` | `/projects/{id}` | the project's documents and chat history |
+| `DELETE` | `/projects/{id}` | remove a project, its index and its stored files |
+| `POST` | `/projects/{id}/documents` | upload + ingest + index one file (multipart) |
+| `DELETE` | `/projects/{id}/documents/{doc_id}` | remove a document and its vectors |
+| `GET` | `/projects/{id}/documents/{doc_id}/chunks` | every chunk of one document (debugging) |
+| `POST` | `/projects/{id}/query` | ask a question → answer + citations |
+| `POST` | `/projects/{id}/query/stream` | the same, streamed as it is written (newline-delimited JSON: `token`, `ping`, `done`, `error`); closing the connection stops generation |
+| `GET` | `/projects/{id}/chunks/{vector_id}` | untruncated source text behind a citation |
 | `GET` | `/audit/queries` | recent audit entries |
 | `GET` | `/audit/documents` | ingest/delete history |
 | `GET` | `/audit/verify` | re-compute the audit hash chain |
 | `POST` | `/audit/export` | dump the audit log to JSON Lines on disk |
+| `GET` | `/setup/status`, `/setup/catalog` | is a model present; the model catalog |
+| `GET` | `/setup/download/{model_id}` | sanctioned model download (server-sent progress) |
+| `POST` | `/setup/switch-model` | load a downloaded model and remember the choice |
 
-Example:
+Example (take a project id from `GET /projects`):
 
 ```bash
-curl -X POST http://127.0.0.1:8765/query -H "Content-Type: application/json" -d "{\"question\":\"What is the notice period?\",\"top_k\":5}"
+curl -X POST http://127.0.0.1:8765/projects/<project-id>/query -H "Content-Type: application/json" -d "{\"question\":\"What is the notice period?\",\"top_k\":5,\"strict_mode\":true}"
 ```
 
 ---
@@ -331,35 +372,37 @@ with an environment variable.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SAFE_INSIGHT_LLM_FILE` | `Phi-3.5-mini-instruct-Q4_K_M.gguf` | GGUF filename to load |
-| `SAFE_INSIGHT_LLM_PATH` | `backend/models/llm/<file>` | full path override |
+| `SAFE_INSIGHT_DATA_DIR` | per-user data dir (`%LOCALAPPDATA%\safe-insight` on Windows) | where models, uploads, indexes and logs live |
+| `SAFE_INSIGHT_MODELS_DIR` | `<data dir>/models` | where GGUF and embedding models live |
+| `SAFE_INSIGHT_LLM_FILE` | the model picked in the app, else `Phi-3.5-mini-instruct-Q4_K_M.gguf` | GGUF filename to load; setting it overrides the in-app choice |
+| `SAFE_INSIGHT_LLM_PATH` | `<models dir>/llm/<file>` | full path override |
 | `SAFE_INSIGHT_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | embedding model |
 | `SAFE_INSIGHT_TOP_K` | `5` | chunks retrieved per query |
-| `SAFE_INSIGHT_MIN_SIMILARITY` | `0.20` | cosine floor before a chunk is used |
+| `SAFE_INSIGHT_MIN_SIMILARITY` | `0.20` | cosine floor below which a chunk is not retrieved at all |
+| `SAFE_INSIGHT_MIN_SIMILARITY_GROUNDED` | `0.50` | the best chunk must reach this for the answer to use the documents |
+| `SAFE_INSIGHT_RELEVANCE_MARGIN` | `0.10` | only chunks within this of the best one go into the prompt (each costs seconds on a CPU) |
+| `SAFE_INSIGHT_MIN_PASSAGE_WORDS` | `5` | shorter chunks (e.g. a slide that is only a heading) are skipped at question time |
 | `SAFE_INSIGHT_CHUNK_SIZE` | `500` | target chunk size in tokens |
 | `SAFE_INSIGHT_CHUNK_OVERLAP` | `50` | overlap in tokens |
-| `SAFE_INSIGHT_LLM_CTX` | `4096` | model context window |
-| `SAFE_INSIGHT_LLM_THREADS` | `cpu_count - 1` | inference threads |
+| `SAFE_INSIGHT_LLM_CTX` | the model's `n_ctx` in the catalog, else `4096` | model context window |
+| `SAFE_INSIGHT_LLM_MAX_TOKENS` | `2048` | longest answer (~1,500 words); longer ones end with "[Answer cut off at the length limit.]" |
+| `SAFE_INSIGHT_LLM_THREADS` | `cpu_count / 2` | inference threads |
+| `SAFE_INSIGHT_LLM_GPU_LAYERS` | `-1` (all) | layers offloaded to a GPU, if llama.cpp was built with one |
 | `SAFE_INSIGHT_PORT` | `8765` | backend port (also update `frontend/src/api.ts`) |
 | `SAFE_INSIGHT_STRICT_NETWORK` | `true` | `false` = log outbound attempts instead of blocking |
-| `SAFE_INSIGHT_DATA_DIR` | `backend/data` | where index, uploads and audit log live |
 
-**Swapping the language model** — download the alternative and point at it:
-
-```bash
-python download_model.py --llm llama3
-```
-
-```bash
-set SAFE_INSIGHT_LLM_FILE=Llama-3.2-3B-Instruct-Q4_K_M.gguf
-```
-
-No code change is needed: the chat template is read from the GGUF metadata.
+**Swapping the language model** — click the model name in the footer and pick
+another from the catalog. The app downloads it if needed, loads it without a
+restart, and remembers the choice (in `settings.json` in the data directory).
+To use a GGUF that is not in the catalog, put it in `<models dir>/llm/` and set
+`SAFE_INSIGHT_LLM_FILE` to its filename. No code change is needed: the chat
+template is read from the GGUF metadata.
 
 > ⚠️ Changing the **embedding** model is different. The FAISS index is built for
 > one vector dimension, and vectors from two different models are not comparable.
-> Delete `backend/data/index/` and re-ingest after switching. The app detects the
-> mismatch and refuses to load rather than returning meaningless scores.
+> Delete the project folders under `<data dir>/projects/` and re-ingest after
+> switching. Adding vectors of a different dimension to an existing index is
+> refused rather than silently producing meaningless scores.
 
 ---
 
@@ -378,10 +421,12 @@ as JSON Lines on demand.
 
 **Hash-chained audit records.** Each row stores the hash of the previous record
 plus a hash of itself. Editing or deleting history breaks the chain, and
-`GET /audit/verify` reports exactly where. This is not cryptographic
-non-repudiation — a determined local user with the source can recompute the chain
-— but it makes *silent* tampering impossible, which is what an audit trail is
-for.
+`GET /audit/verify` reports exactly where. The hash covers every stored field —
+question, answer, citations, token counts, project — and each row records which
+field set it was hashed with, so logs written by older builds (which hashed
+fewer fields) still verify. This is not cryptographic non-repudiation — a
+determined local user with the source can recompute the chain — but it makes
+*silent* tampering impossible, which is what an audit trail is for.
 
 **Exact FAISS search (`IndexFlatIP`), not an approximate index.** At the target
 scale — a few hundred documents, tens of thousands of vectors — a brute-force
@@ -400,10 +445,24 @@ download a vocabulary file on first use, which would break the offline guarantee
 at install time. Chunk boundaries only need to be roughly right, so we use a
 words-per-token ratio and give the model a generous context margin.
 
-**A similarity floor before generation.** Chunks scoring below 0.20 are dropped
-before they reach the prompt. Without this, an off-topic question retrieves the
-five least-irrelevant chunks in the corpus and the model dutifully builds an
-answer from them. With it, the answer is the honest refusal string.
+**Two similarity thresholds before generation.** Chunks scoring below 0.20 are
+not retrieved at all, and the passages only reach the prompt if the best one
+scores at least 0.50. Without this, an off-topic question retrieves the five
+least-irrelevant chunks in the corpus and the model dutifully builds an answer
+from them. With it, strict mode gives the honest refusal string and normal mode
+gives a general answer that is labelled as not coming from the documents. The
+0.50 cutoff suits `bge-small`, which tends to score high; the
+`all-MiniLM-L6-v2` fallback tends to score lower, so if it is the model in use
+and relevant passages are being ignored, lower
+`SAFE_INSIGHT_MIN_SIMILARITY_GROUNDED`.
+
+**Built for CPU-only machines.** Reading the prompt is the slow part on a CPU
+(about 50–90 tokens a second on a fast laptop), so the prompt is kept small:
+only passages within 0.10 of the best match go in (a rent question went from 5
+passages and 23 s to 2 passages and 6 s), chat history is the last two
+exchanges capped at ~500 tokens, and normal-mode answers are asked to be short.
+Answer length is the other cost — every generated token takes ~0.1 s with an
+8B model — which is why a smaller model is the biggest remaining speed lever.
 
 **Retrieval-only stub mode.** If no GGUF file is present, the app does not crash
 — it returns a clearly-labelled placeholder listing the retrieved passages and
@@ -435,12 +494,15 @@ pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-c
 ```
 
 **`faiss-cpu` will not install.**
-Use Python 3.10–3.12. There are no 3.13 wheels for some platforms yet.
+There may be no wheel for your Python version and platform yet. Use a Python
+version that `faiss-cpu` publishes wheels for.
 
 **"No local embedding model found."**
-`python download_model.py --embedding-only` has not been run, or
-`SAFE_INSIGHT_MODELS_DIR` points somewhere else. Check with
-`python download_model.py --check`.
+Neither the setup wizard nor `python download_model.py --embedding-only` has
+run, or `SAFE_INSIGHT_MODELS_DIR` points somewhere else. Check with
+`python download_model.py --check`, which prints the directory it looks in.
+(Builds before this one saved script downloads to `backend/models/`; move them
+into the data directory, or point `SAFE_INSIGHT_MODELS_DIR` there.)
 
 **Backend starts, UI says it cannot reach it.**
 Port 8765 is in use. Set `SAFE_INSIGHT_PORT` and update `BACKEND_PORT` in
@@ -462,12 +524,17 @@ backend. The badge goes green once nothing in the process attempts an outbound
 connection.
 
 **Ingest returns "No extractable text found".**
-The PDF is a scan (images, no text layer). Safe Insight bundles no OCR engine —
-see *Known limitations*.
+The PDF is a scan (images, no text layer). PDFs are not OCR'd — see *Known
+limitations*.
 
-**The answer says the documents do not contain enough information, but they do.**
-Lower the floor (`SAFE_INSIGHT_MIN_SIMILARITY=0.1`) or raise `top_k`. Very short
-chunks or very long questions both push similarity scores down.
+**Pasting a screenshot fails with "Tesseract OCR is not installed".**
+Images are read with the Tesseract OCR engine, which is a separate install
+(`winget install tesseract-ocr` on Windows) and must be on `PATH`.
+
+**The answer says the documents do not contain enough information (or answers
+from general knowledge), but they do.** Lower the grounding cutoff
+(`SAFE_INSIGHT_MIN_SIMILARITY_GROUNDED=0.4`) or raise `top_k`. Very short chunks
+or very long questions both push similarity scores down.
 
 ---
 
@@ -476,12 +543,13 @@ chunks or very long questions both push similarity scores down.
 These are deliberate v1 scope calls, listed here so they can be discussed rather
 than discovered.
 
-1. **No OCR.** Scanned PDFs with no text layer cannot be ingested. Adding
-   Tesseract would keep the offline guarantee but adds a large native dependency.
+1. **No OCR for PDFs.** Scanned PDFs with no text layer cannot be ingested.
+   Images (PNG/JPG) are OCR'd, but only if Tesseract is installed separately.
 2. **English-centric.** Both embedding models are English. Multilingual documents
    need a multilingual embedding model (and a re-index).
-3. **No conversation memory.** Each question is answered independently; "and what
-   about clause 4?" will not resolve against the previous turn.
+3. **Short conversation memory.** The project's last few turns (up to ~1,000
+   tokens) go into the prompt, so "and what about clause 4?" can resolve against
+   recent context, but retrieval itself only searches with the new question.
 4. **Dev-mode process spawn.** The Tauri shell launches the system Python.
    Shipping a self-contained installer needs PyInstaller — see below.
 5. **Page numbers for PDFs only.** DOCX has no page model until it is rendered,
@@ -497,8 +565,10 @@ than discovered.
 
 Roughly in order of value per unit of effort:
 
-1. **Streaming answers** — `llama-cpp-python` supports `stream=True`; the UI
-   currently waits for the whole response.
+1. **A smaller default model for CPU-only machines** — answers now stream (first
+   words in ~2 s), but an 8B model still writes only ~10 tokens a second on a
+   laptop CPU, so long answers take a while to finish. A 3B model would be
+   ~2.5× faster.
 2. **Highlight the excerpt inside the source PDF** — `char_start`/`char_end` are
    already stored on every chunk for exactly this.
 3. **Hybrid retrieval** — add BM25 keyword search alongside the vector search and

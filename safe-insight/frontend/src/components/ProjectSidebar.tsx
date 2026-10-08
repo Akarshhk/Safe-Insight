@@ -11,9 +11,11 @@ interface Project {
 interface ProjectSidebarProps {
   activeProjectId: string | null;
   onProjectSelect: (id: string | null) => void;
+  /** Re-fetch when this changes, so doc counts follow uploads and removals. */
+  refreshKey: number;
 }
 
-export default function ProjectSidebar({ activeProjectId, onProjectSelect }: ProjectSidebarProps) {
+export default function ProjectSidebar({ activeProjectId, onProjectSelect, refreshKey }: ProjectSidebarProps) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -34,7 +36,7 @@ export default function ProjectSidebar({ activeProjectId, onProjectSelect }: Pro
 
   useEffect(() => {
     fetchProjects();
-  }, []);
+  }, [refreshKey]);
 
   const handleNewProject = async () => {
     const name = prompt("Enter project name:", "New Project");

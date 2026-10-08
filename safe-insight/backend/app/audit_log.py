@@ -68,7 +68,9 @@ CREATE TABLE IF NOT EXISTS query_log (
     stub_mode         INTEGER DEFAULT 0,
     grounded          INTEGER DEFAULT 1,
     prev_hash         TEXT    NOT NULL,
-    record_hash       TEXT    NOT NULL
+    record_hash       TEXT    NOT NULL,
+    project_id        TEXT,
+    hash_version      INTEGER DEFAULT 1   -- which fields record_hash covers
 );
 
 CREATE INDEX IF NOT EXISTS idx_query_log_timestamp ON query_log (timestamp_utc);
@@ -96,6 +98,15 @@ CREATE INDEX IF NOT EXISTS idx_system_log_timestamp ON system_log (timestamp_utc
 
 _GENESIS_HASH = "0" * 64
 _write_lock = threading.Lock()
+
+#: Version 2 hashes every stored field, so citations, token counts and the
+#: project cannot be edited unnoticed either. Version 1 rows (written by older
+#: builds) covered only these fields and are still verified that way.
+HASH_VERSION = 2
+_V1_HASHED_FIELDS = (
+    "timestamp_utc", "query", "answer", "top_k", "retrieved_ids",
+    "documents_touched", "model", "latency_ms", "grounded",
+)
 
 
 def _utc_now() -> str:
@@ -129,11 +140,17 @@ def init_db(db_path: Optional[Path] = None) -> None:
     """Create tables and indexes if absent. Safe to call on every startup."""
     with _connect(db_path) as connection:
         connection.executescript(SCHEMA)
-        try:
-            # Migration: add grounded column if it doesn't exist
-            connection.execute("ALTER TABLE query_log ADD COLUMN grounded INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass # Column already exists
+        # Migrations for logs created by older builds. Existing rows pick up
+        # hash_version 1, which is what they were hashed with.
+        for column in (
+            "grounded INTEGER DEFAULT 1",
+            "project_id TEXT",
+            "hash_version INTEGER DEFAULT 1",
+        ):
+            try:
+                connection.execute(f"ALTER TABLE query_log ADD COLUMN {column}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
     logger.info("Audit log ready at %s", db_path or config.AUDIT_DB_PATH)
 
 
@@ -165,6 +182,7 @@ def log_query(
     completion_tokens: int = 0,
     stub_mode: bool = False,
     grounded: bool = True,
+    project_id: Optional[str] = None,
     db_path: Optional[Path] = None,
 ) -> int:
     """
@@ -183,16 +201,23 @@ def log_query(
         The row id of the new entry.
     """
     timestamp = _utc_now()
+    # Every stored field (hash_version 2); must match _hashed_field_sets.
     record = {
         "timestamp_utc": timestamp,
         "query": query,
         "answer": answer,
         "top_k": top_k,
         "retrieved_ids": retrieved_ids,
+        "citations": citations,
         "documents_touched": documents_touched,
         "model": model,
+        "embedding_model": embedding_model,
         "latency_ms": latency_ms,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "stub_mode": stub_mode,
         "grounded": grounded,
+        "project_id": project_id,
     }
 
     # Serialise writes: the hash chain must be built one row at a time.
@@ -205,8 +230,9 @@ def log_query(
                 INSERT INTO query_log (
                     timestamp_utc, query, answer, top_k, retrieved_ids, citations,
                     documents_touched, model, embedding_model, latency_ms,
-                    prompt_tokens, completion_tokens, stub_mode, grounded, prev_hash, record_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prompt_tokens, completion_tokens, stub_mode, grounded, prev_hash, record_hash,
+                    project_id, hash_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
@@ -225,6 +251,8 @@ def log_query(
                     int(grounded),
                     prev_hash,
                     record_hash,
+                    project_id,
+                    HASH_VERSION,
                 ),
             )
             return int(cursor.lastrowid)
@@ -296,8 +324,41 @@ def _row_to_query_dict(row: sqlite3.Row) -> Dict[str, Any]:
         "completion_tokens": row["completion_tokens"],
         "stub_mode": bool(row["stub_mode"]),
         "grounded": bool(row["grounded"]),
+        "project_id": row["project_id"],
         "record_hash": row["record_hash"],
     }
+
+
+def _hashed_field_sets(row: sqlite3.Row) -> List[Dict[str, Any]]:
+    """
+    Rebuild the dict ``log_query`` hashed for this row.
+
+    Version 1 rows come in two shapes: builds from before the ``grounded``
+    column hashed without it. Both are returned; a row verifies only if its
+    stored hash matches one of them exactly, so any edit still breaks it.
+    """
+    fields = {
+        "timestamp_utc": row["timestamp_utc"],
+        "query": row["query"],
+        "answer": row["answer"],
+        "top_k": row["top_k"],
+        "retrieved_ids": json.loads(row["retrieved_ids"]),
+        "citations": json.loads(row["citations"]),
+        "documents_touched": json.loads(row["documents_touched"]),
+        "model": row["model"],
+        "embedding_model": row["embedding_model"],
+        "latency_ms": row["latency_ms"],
+        "prompt_tokens": row["prompt_tokens"],
+        "completion_tokens": row["completion_tokens"],
+        "stub_mode": bool(row["stub_mode"]),
+        "grounded": bool(row["grounded"]),
+        "project_id": row["project_id"],
+    }
+    if (row["hash_version"] or 1) < 2:
+        v1 = {key: fields[key] for key in _V1_HASHED_FIELDS}
+        before_grounded = {key: value for key, value in v1.items() if key != "grounded"}
+        return [v1, before_grounded]
+    return [fields]
 
 
 def get_recent_queries(
@@ -349,19 +410,10 @@ def verify_chain(db_path: Optional[Path] = None) -> Dict[str, Any]:
 
     prev_hash = _GENESIS_HASH
     for index, row in enumerate(rows, start=1):
-        record = {
-            "timestamp_utc": row["timestamp_utc"],
-            "query": row["query"],
-            "answer": row["answer"],
-            "top_k": row["top_k"],
-            "retrieved_ids": json.loads(row["retrieved_ids"]),
-            "documents_touched": json.loads(row["documents_touched"]),
-            "model": row["model"],
-            "latency_ms": row["latency_ms"],
-            "grounded": bool(row["grounded"]),
+        expected = {
+            _compute_record_hash(fields, prev_hash) for fields in _hashed_field_sets(row)
         }
-        expected = _compute_record_hash(record, prev_hash)
-        if row["prev_hash"] != prev_hash or row["record_hash"] != expected:
+        if row["prev_hash"] != prev_hash or row["record_hash"] not in expected:
             return {
                 "valid": False,
                 "checked": index,

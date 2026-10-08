@@ -141,6 +141,15 @@ MIN_SIMILARITY: Final[float] = _env_float("SAFE_INSIGHT_MIN_SIMILARITY", 0.20)
 #: this, the question is treated as a general/small-talk question.
 MIN_SIMILARITY_GROUNDED: Final[float] = _env_float("SAFE_INSIGHT_MIN_SIMILARITY_GROUNDED", 0.50)
 
+#: Only passages scoring within this margin of the best one go into the prompt.
+#: On a CPU every passage costs seconds of prompt reading, and weak matches
+#: (e.g. 0.43 next to a 0.63) rarely help the answer.
+RELEVANCE_MARGIN: Final[float] = _env_float("SAFE_INSIGHT_RELEVANCE_MARGIN", 0.10)
+
+#: Passages shorter than this are skipped at question time. A slide that is only
+#: a heading ("Implications for Theorem") scores highly against almost anything.
+MIN_PASSAGE_WORDS: Final[int] = _env_int("SAFE_INSIGHT_MIN_PASSAGE_WORDS", 5)
+
 def _get_llm_context_tokens() -> int:
     try:
         import json
@@ -155,7 +164,10 @@ def _get_llm_context_tokens() -> int:
     return 4096
 
 LLM_CONTEXT_TOKENS: int = _env_int("SAFE_INSIGHT_LLM_CTX", _get_llm_context_tokens())
-LLM_MAX_OUTPUT_TOKENS: Final[int] = _env_int("SAFE_INSIGHT_LLM_MAX_TOKENS", 512)
+#: Longest answer, ~1,500 words. Generous on purpose: answers stream and the UI
+#: has a Stop button, so a long list should finish rather than be cut off.
+#: llama.cpp also shrinks this automatically if the prompt leaves less room.
+LLM_MAX_OUTPUT_TOKENS: Final[int] = _env_int("SAFE_INSIGHT_LLM_MAX_TOKENS", 2048)
 LLM_TEMPERATURE: Final[float] = _env_float("SAFE_INSIGHT_LLM_TEMPERATURE", 0.2)
 LLM_THREADS: Final[int] = _env_int(
     "SAFE_INSIGHT_LLM_THREADS", max(1, (os.cpu_count() or 4) // 2)

@@ -108,6 +108,8 @@ export default function App() {
         <SetupWizard onComplete={() => {
           setShowSetup(false);
           setBoot("ready");
+          // Health was fetched before the model existed; refresh the footer.
+          getHealth().then(setHealth).catch(() => {});
         }} />
       );
     }
@@ -150,9 +152,10 @@ export default function App() {
       </header>
 
       <main className="app__body">
-        <ProjectSidebar 
-          activeProjectId={activeProjectId} 
-          onProjectSelect={setActiveProjectId} 
+        <ProjectSidebar
+          activeProjectId={activeProjectId}
+          onProjectSelect={setActiveProjectId}
+          refreshKey={documents.length}
         />
         
         <div className="app__content">
@@ -185,7 +188,8 @@ export default function App() {
               : "No language model - retrieval-only mode"}
           </button>
           {health?.index.embedding_model ? ` · Embeddings: ${health.index.embedding_model}` : ""}
-          {` · ${health?.index.vectors ?? 0} vectors indexed`}
+          {activeProjectId &&
+            ` · ${documents.reduce((sum, doc) => sum + doc.chunk_count, 0)} vectors indexed in this project`}
           {` · ${health?.audit.query_count ?? 0} queries logged`}
         </span>
         <button type="button" className="btn btn--small" onClick={() => void handleVerifyAudit()}>
@@ -201,7 +205,7 @@ export default function App() {
             setShowModelSwitcher(false);
             // Refresh health to get new active model status
             try {
-              const status = await getHealth(); // using imported getHealth ? Wait, getHealth is not imported in App.tsx! But waitForBackend calls getHealth. Let's import getHealth.
+              const status = await getHealth();
               setHealth(status);
             } catch(e) {}
           }} 

@@ -27,6 +27,12 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Pasting into a text field (e.g. the question box) is typing, not an upload. */
+function isEditableTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+}
+
 export default function DocumentPanel({ activeProjectId, documents, loading, onChanged }: Props) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
@@ -146,22 +152,23 @@ export default function DocumentPanel({ activeProjectId, documents, loading, onC
 
     const handlePaste = async (event: ClipboardEvent) => {
       console.log("[Paste Debug] Paste event fired!", event);
+      if (isEditableTarget(event.target)) return;
       if (!activeProjectId || busy) return;
 
       const dt = event.clipboardData;
       if (!dt) return;
+      // clipboardData is emptied once this handler first awaits, so read it now.
+      const pastedFiles = Array.from(dt.files);
+      const pastedText = dt.getData("text/plain");
+      event.preventDefault();
 
       // Try native first! Right-click paste doesn't trigger keydown.
       const handledNatively = await ingestFromNativeClipboard();
-      if (handledNatively) {
-        event.preventDefault();
-        return;
-      }
-      
+      if (handledNatively) return;
+
       // Fallback to web APIs
-      if (dt.files && dt.files.length > 0) {
-        const filesArray = Array.from(dt.files);
-        const processedFiles = filesArray.map(f => {
+      if (pastedFiles.length > 0) {
+        const processedFiles = pastedFiles.map(f => {
           if (f.type.startsWith("image/") && f.name === "image.png") {
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
             return new File([f], `Pasted screenshot - ${timestamp}.png`, { type: f.type });
@@ -175,36 +182,10 @@ export default function DocumentPanel({ activeProjectId, documents, loading, onC
         }
       }
 
-      // 2. Tauri native file clipboard reading for Windows File Explorer copies
-      try {
-        const { readFiles } = await import('@tauri-apps/plugin-clipboard-manager');
-        const { convertFileSrc } = await import('@tauri-apps/api/core');
-        
-        const osFiles = await readFiles();
-        if (osFiles && osFiles.length > 0) {
-          const files: File[] = [];
-          for (const path of osFiles) {
-            const url = convertFileSrc(path);
-            const response = await fetch(url);
-            const blob = await response.blob();
-            // Extract filename from path
-            const filename = path.split(/[\\/]/).pop() || "unknown";
-            files.push(new File([blob], filename));
-          }
-          if (files.length > 0) {
-            await handleFiles(files);
-            return;
-          }
-        }
-      } catch (e) {
-        console.warn("Tauri clipboard manager read failed:", e);
-      }
-
-      // 3. Fallback to raw text
-      const text = dt.getData("text/plain");
-      if (text && text.trim()) {
+      // Fallback to raw text
+      if (pastedText && pastedText.trim()) {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const file = new File([text], `Pasted text - ${timestamp}.txt`, { type: "text/plain" });
+        const file = new File([pastedText], `Pasted text - ${timestamp}.txt`, { type: "text/plain" });
         await handleFiles([file]);
       }
     };
@@ -212,18 +193,15 @@ export default function DocumentPanel({ activeProjectId, documents, loading, onC
     const handleKeyDown = async (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
         // Don't intercept if user is pasting text into an input or textarea
-        const target = e.target as HTMLElement;
-        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
-          return;
-        }
-        
+        if (isEditableTarget(e.target)) return;
+
         console.log("[Paste Debug] Ctrl+V keydown intercepted!");
         if (!activeProjectId || busy) return;
-        
-        const handled = await ingestFromNativeClipboard();
-        if (handled) {
-          e.preventDefault();
-        }
+
+        // Cancel the keystroke before awaiting: otherwise the browser also
+        // fires a paste event and the same clipboard is ingested twice.
+        e.preventDefault();
+        await ingestFromNativeClipboard();
       }
     };
 

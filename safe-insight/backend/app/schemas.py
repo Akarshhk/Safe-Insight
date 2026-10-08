@@ -183,6 +183,7 @@ class AuditEntryOut(BaseModel):
     completion_tokens: int = 0
     stub_mode: bool = False
     grounded: bool = True
+    project_id: Optional[str] = None
     record_hash: str
 
 

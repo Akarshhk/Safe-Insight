@@ -9,7 +9,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { askQuestion, ApiError } from "../api";
+import { askQuestionStream, ApiError } from "../api";
 import type { ChatMessage } from "../types";
 import CitationList from "./CitationList";
 
@@ -25,6 +25,9 @@ interface Props {
 let messageCounter = 0;
 const nextId = () => `m${(messageCounter += 1)}`;
 
+/** Same wording the backend saves, so the chat reads the same after a reload. */
+const STOPPED_NOTE = "[Stopped before the answer was finished.]";
+
 export default function ChatPanel({ activeProjectId, hasDocuments, topK, onTopKChange, initialMessages }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
@@ -32,10 +35,20 @@ export default function ChatPanel({ activeProjectId, hasDocuments, topK, onTopKC
   const [strictMode, setStrictMode] = useState(false);
   const transcriptEnd = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  /** The answer being written right now, if any - what the Stop button aborts. */
+  const answering = useRef<AbortController | null>(null);
+  const currentProject = useRef(activeProjectId);
 
   useEffect(() => {
     setMessages(initialMessages);
   }, [initialMessages]);
+
+  // Switching project (or closing the panel) stops the answer in progress, so it
+  // can't land in another project's chat; the backend stops generating as well.
+  useEffect(() => {
+    currentProject.current = activeProjectId;
+    return () => answering.current?.abort();
+  }, [activeProjectId]);
 
   useEffect(() => {
     transcriptEnd.current?.scrollIntoView({ behavior: "smooth" });
@@ -46,42 +59,80 @@ export default function ChatPanel({ activeProjectId, hasDocuments, topK, onTopKC
     const question = input.trim();
     if (!question || pending) return;
 
-    setMessages((current) => [...current, { id: nextId(), role: "user", text: question }]);
+    const projectId = activeProjectId;
+    const asked: ChatMessage = { id: nextId(), role: "user", text: question };
+    const answerId = nextId();
+    setMessages((current) => [
+      ...current,
+      asked,
+      { id: answerId, role: "assistant", text: "", streaming: true },
+    ]);
     setInput("");
     setPending(true);
 
+    const controller = new AbortController();
+    answering.current = controller;
+    let written = "";
+    // Update the answer bubble in place. If the transcript was reloaded meanwhile
+    // (e.g. a document upload refreshed it), put this exchange back rather than
+    // lose it; if the user has moved to another project, leave that chat alone.
+    const showAnswer = (patch: Partial<ChatMessage>) => {
+      if (currentProject.current !== projectId) return;
+      setMessages((current) => {
+        if (current.some((m) => m.id === answerId)) {
+          return current.map((m) => (m.id === answerId ? { ...m, ...patch } : m));
+        }
+        const question = current.some((m) => m.id === asked.id) ? [] : [asked];
+        return [...current, ...question, { id: answerId, role: "assistant", text: "", ...patch }];
+      });
+    };
+
     try {
-      if (!activeProjectId) throw new Error("No active project");
-      const response = await askQuestion(activeProjectId, question, topK, strictMode);
-      setMessages((current) => [
-        ...current,
-        {
-          id: nextId(),
-          role: "assistant",
-          text: response.answer,
-          citations: response.citations,
-          meta: {
-            latencyMs: response.latency_ms,
-            model: response.model,
-            retrievedCount: response.retrieved_count,
-            stubMode: response.stub_mode,
-            auditId: response.audit_id,
-            grounded: response.grounded,
-          },
+      if (!projectId) throw new Error("No active project");
+      const response = await askQuestionStream(
+        projectId,
+        question,
+        topK,
+        strictMode,
+        (text) => {
+          written += text;
+          showAnswer({ text: written });
         },
-      ]);
+        controller.signal,
+      );
+      showAnswer({
+        text: response.answer,
+        streaming: false,
+        citations: response.citations,
+        meta: {
+          latencyMs: response.latency_ms,
+          model: response.model,
+          retrievedCount: response.retrieved_count,
+          stubMode: response.stub_mode,
+          auditId: response.audit_id,
+          grounded: response.grounded,
+        },
+      });
     } catch (err) {
-      const text =
-        err instanceof ApiError && err.status === 503
-          ? `${err.message}\n\nThe embedding model is required before anything can be searched.`
-          : err instanceof Error
-            ? err.message
-            : String(err);
-      setMessages((current) => [
-        ...current,
-        { id: nextId(), role: "assistant", text, isError: true },
-      ]);
+      if (controller.signal.aborted && !(err instanceof ApiError)) {
+        // Stopped on purpose: keep what was written, marked like the saved copy.
+        showAnswer({ text: `${written.trim()}\n\n${STOPPED_NOTE}`.trim(), streaming: false });
+      } else {
+        const reason =
+          err instanceof ApiError && err.status === 503
+            ? `${err.message}\n\nThe embedding model is required before anything can be searched.`
+            : err instanceof Error
+              ? err.message
+              : String(err);
+        // Keep the partial answer visible above the reason it ended.
+        showAnswer({
+          text: written.trim() ? `${written.trim()}\n\n${reason}` : reason,
+          streaming: false,
+          isError: true,
+        });
+      }
     } finally {
+      if (answering.current === controller) answering.current = null;
       setPending(false);
       // Wait for pending state to update the DOM, then refocus
       setTimeout(() => {
@@ -145,7 +196,13 @@ export default function ChatPanel({ activeProjectId, hasDocuments, topK, onTopKC
           ) : (
             <div key={message.id} className="turn turn--assistant">
               <div className={`bubble bubble--assistant ${message.isError ? "bubble--error" : ""}`}>
-                <p className="answer">{message.text}</p>
+                {message.streaming && !message.text ? (
+                  <p className="muted">Reading your question and documents...</p>
+                ) : (
+                  <p className={`answer ${message.streaming ? "answer--streaming" : ""}`}>
+                    {message.text}
+                  </p>
+                )}
 
                 {message.meta && (
                   <p className="muted small answer-meta">
@@ -167,20 +224,12 @@ export default function ChatPanel({ activeProjectId, hasDocuments, topK, onTopKC
                   </p>
                 )}
 
-                {message.citations && message.citations.length > 0 && (
-                  <CitationList citations={message.citations} />
+                {activeProjectId && message.citations && message.citations.length > 0 && (
+                  <CitationList projectId={activeProjectId} citations={message.citations} />
                 )}
               </div>
             </div>
           ),
-        )}
-
-        {pending && (
-          <div className="turn turn--assistant">
-            <div className="bubble bubble--assistant">
-              <p className="muted">Retrieving passages and generating locally...</p>
-            </div>
-          </div>
         )}
 
         <div ref={transcriptEnd} />
@@ -202,9 +251,16 @@ export default function ChatPanel({ activeProjectId, hasDocuments, topK, onTopKC
             }
           }}
         />
-        <button type="submit" className="btn btn--primary" disabled={pending || !input.trim() || !activeProjectId}>
-          {pending ? "Thinking..." : "Ask"}
-        </button>
+        {pending ? (
+          // Always a way out: stops the answer here and on the backend.
+          <button type="button" className="btn" onClick={() => answering.current?.abort()}>
+            Stop
+          </button>
+        ) : (
+          <button type="submit" className="btn btn--primary" disabled={!input.trim() || !activeProjectId}>
+            Ask
+          </button>
+        )}
       </form>
     </section>
   );

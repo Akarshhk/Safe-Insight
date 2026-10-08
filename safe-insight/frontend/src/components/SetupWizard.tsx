@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { getModelCatalog, BASE_URL } from "../api";
+import { getModelCatalog, switchModel, BASE_URL } from "../api";
 
 interface ModelEntry {
   id: string;
   tier: string;
   name: string;
+  filename: string;
   size_gb: number;
   min_ram_gb: number;
   description: string;
@@ -37,6 +38,8 @@ export default function SetupWizard({ onComplete }: SetupWizardProps) {
 
   const startDownload = () => {
     if (!selectedModel) return;
+    const model = catalog.find((m) => m.id === selectedModel);
+    if (!model) return;
     setDownloading(true);
     setError(null);
     setProgress(0);
@@ -59,14 +62,21 @@ export default function SetupWizard({ onComplete }: SetupWizardProps) {
 
         if (data.status === "Complete" && data.progress === 100) {
           source.close();
-          onComplete(); // Model downloaded and set as active, exit wizard
+          // The download only saves the choice; load it into the backend now.
+          setStatus("Loading model...");
+          switchModel(model.filename)
+            .then(() => onComplete())
+            .catch((err) => {
+              setError(err instanceof Error ? err.message : String(err));
+              setDownloading(false);
+            });
         }
       } catch (err) {
         console.error("Parse error", err);
       }
     };
 
-    source.onerror = (err) => {
+    source.onerror = () => {
       setError("Connection lost. You can try again to resume.");
       setDownloading(false);
       source.close();
